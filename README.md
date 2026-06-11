@@ -12,11 +12,19 @@ Built for group betting pools that use the [Excel Porra Mundial](https://matejer
 User uploads Excel file + Telegram chat ID
             │
             ▼
-    ┌───────────────┐     every 5 min     ┌───────────────────────┐
-    │   FastAPI app │ ──────────────────► │  football-data.org API │
-    │   + SQLite    │                     │  (match results)       │
-    └───────┬───────┘                     └───────────────────────┘
-            │  match finished?
+    ┌───────────────┐  every 60 s   ┌──────────────────────────┐
+    │   FastAPI app │ ────────────► │  football-data.org API    │
+    │   + SQLite    │               │  (match status + scores)  │
+    └───────┬───────┘               └──────────────────────────┘
+            │                              │
+            │  status = FINISHED?          │ score available?
+            │                              │
+            │          NO score yet        ▼
+            │◄──────────────────  ┌──────────────────────┐
+            │                     │  ESPN scoreboard API  │
+            │  score resolved      │  (fallback scores)   │
+            │◄────────────────── └──────────────────────┘
+            │
             ▼
     ┌───────────────┐
     │  Telegram Bot │ ──► "⚽ España 2–1 Francia  ✅ Correct!"
@@ -24,6 +32,8 @@ User uploads Excel file + Telegram chat ID
 ```
 
 Each user uploads their own Excel file and provides their personal Telegram chat ID. A single shared Telegram bot sends everyone their individual results.
+
+**Why two APIs?** football-data.org (free tier) updates the match status to `FINISHED` quickly but can take 30–60 minutes to populate the actual score. To avoid that delay, whenever a match is marked finished but has no score yet, the app falls back to ESPN's scoreboard API — which typically has the final score within a minute of the final whistle. No ESPN account or API key is required.
 
 ---
 
