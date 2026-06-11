@@ -175,7 +175,7 @@ All default to `1 / 1 / 2`. Only set the ones that differ from your group's rule
 ### Users (share this with your group)
 
 1. **Get your chat ID** — start the bot on Telegram and send it `/chatid`. It replies with your numeric ID.
-2. **Open the app** — go to the deployed URL, fill in your name, your chat ID, and upload your Excel Porra Mundial `.xlsx` file.
+2. **Open the app** — go to the deployed URL, enter your chat ID, and upload your completed Excel Porra Mundial `.xlsx` file. Your name is read automatically from the file (Home sheet, cell C10).
 3. **Done.** You'll receive a Telegram notification after each match finishes.
 
 To update your predictions (e.g. after filling in knockout stage picks), just re-submit the form — it overwrites your previous entry.

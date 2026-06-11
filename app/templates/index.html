@@ -132,16 +132,11 @@
     </div>
     <div class="step">
       <div class="step-num">2</div>
-      <div>Fill in the form below and upload your Excel predictions file. The bot will confirm by sending your full predictions list.</div>
+      <div>Fill in your Telegram chat ID below and upload your Excel predictions file. Your name is read automatically from the file. The bot will confirm by sending your full predictions list.</div>
     </div>
   </div>
 
   <form id="reg-form">
-    <div>
-      <label for="name">Your name</label>
-      <input type="text" id="name" name="name" placeholder="e.g. Emanuele" required />
-    </div>
-
     <div>
       <label for="chat_id">
         Telegram chat ID
@@ -192,7 +187,6 @@
         result.className = 'success';
         result.innerHTML =
           `✅ <strong>${data.name}</strong> ${verb} successfully!<br>` +
-          `Found <strong>${data.match_count}</strong> match predictions.<br>` +
           `You'll receive a Telegram message after each match finishes.`;
       } else {
         result.className = 'error';

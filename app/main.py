@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from . import models  # ensure models are registered before create_all
 from .config import get_settings
 from .database import Base, engine, get_db
-from .excel_parser import parse_predictions, to_json
+from .excel_parser import parse_name, parse_predictions, to_json
 from .scheduler import seed_past_matches, start_scheduler, stop_scheduler
 from .telegram_bot import polling_loop, send_predictions_to_user, notify_admin_new_user
 
@@ -83,7 +83,6 @@ async def index(request: Request):
 
 @app.post("/register")
 async def register(
-    name: str = Form(...),
     telegram_chat_id: str = Form(...),
     excel_file: UploadFile = File(...),
     db: Session = Depends(get_db),
@@ -98,6 +97,7 @@ async def register(
 
     try:
         predictions = parse_predictions(file_bytes)
+        name = parse_name(file_bytes) or "Unknown"
     except Exception as e:
         logger.error(f"Excel parse error: {e}")
         raise HTTPException(400, f"Could not parse the Excel file: {e}")

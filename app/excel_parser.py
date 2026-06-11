@@ -34,6 +34,17 @@ class MatchPrediction:
     round_label: str
 
 
+def parse_name(file_bytes: bytes) -> str:
+    """Extract the participant's name from the Home sheet, cell C10."""
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    try:
+        ws = wb["Home"]
+        value = ws["C10"].value
+        return str(value).strip() if value else ""
+    except Exception:
+        return ""
+
+
 def parse_predictions(file_bytes: bytes, utc_offset_hours: int = 2) -> dict[int, MatchPrediction]:
     """
     Parse an Excel Porra Mundial file and return predictions keyed by match number.

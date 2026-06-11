@@ -364,9 +364,6 @@ async def send_predictions_to_user(chat_id: str, bot_token: str):
     finally:
         db.close()
 
-    total = len(user.predictions or {})
-    await send_message(bot_token, chat_id,
-                       f"📥 <b>Predictions loaded!</b> ({total} matches)\nHere's your full list:")
     for msg in messages:
         await send_message(bot_token, chat_id, msg)
 
