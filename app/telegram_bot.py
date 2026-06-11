@@ -31,6 +31,32 @@ async def _get_updates(bot_token: str, offset: int) -> list[dict]:
             return []
 
 
+def _stats(matches: list[NotifiedMatch]) -> tuple[int, int, int, int, int]:
+    """Return (total, sign_only, goal_diff, exact, total_pts) for a list of finished NotifiedMatches."""
+    total = sign_only = goal_diff = exact = total_pts = 0
+    for n in matches:
+        total_pts += n.points or 0
+        cv = n.correct or 0
+        if cv == 0:
+            continue
+        is_exact = cv == 2
+        is_diff = False
+        if (n.predicted_home_goals is not None and n.predicted_away_goals is not None
+                and n.home_score is not None and n.away_score is not None):
+            is_diff = (n.predicted_home_goals - n.predicted_away_goals) == (n.home_score - n.away_score)
+        if is_exact:
+            exact += 1
+        elif is_diff:
+            goal_diff += 1
+        else:
+            sign_only += 1
+    return total, sign_only, goal_diff, exact, total_pts
+
+
+def _stats_line(sign_only: int, goal_diff: int, exact: int) -> str:
+    return f"✅ {sign_only + goal_diff + exact}  ⚽ {goal_diff + exact}  🎯 {exact}"
+
+
 def _build_status(user: User, notified: list[NotifiedMatch]) -> str:
     finished = [n for n in notified if n.home_team and n.away_team]
 
@@ -41,14 +67,8 @@ def _build_status(user: User, notified: list[NotifiedMatch]) -> str:
         return "\n".join(lines)
 
     total_f = len(finished)
-    correct_count = sum(1 for n in finished if (n.correct or 0) >= 1)
-    exact_count = sum(1 for n in finished if (n.correct or 0) == 2)
-
-    total_pts = sum(n.points or 0 for n in finished)
-    lines.append(
-        f"🏆 Results: <b>{correct_count}/{total_f}</b> correct"
-        + (f"  ({exact_count} exact 🎯)" if exact_count else "")
-    )
+    _, sign_only, goal_diff, exact, total_pts = _stats(finished)
+    lines.append(_stats_line(sign_only, goal_diff, exact))
     lines.append(f"⭐ Total points: <b>{total_pts} pts</b>")
     lines.append("")
 
@@ -331,6 +351,38 @@ async def _handle_users(chat_id: str, bot_token: str, admin_chat_id: str):
     await send_message(bot_token, chat_id, "\n".join(lines))
 
 
+async def _handle_standings(chat_id: str, bot_token: str):
+    db: Session = SessionLocal()
+    try:
+        users: list[User] = db.query(User).all()
+        all_notified = db.query(NotifiedMatch).filter(NotifiedMatch.home_team.isnot(None)).all()
+    finally:
+        db.close()
+
+    if not users:
+        await send_message(bot_token, chat_id, "No users registered yet.")
+        return
+
+    by_user: dict[str, list[NotifiedMatch]] = {}
+    for nm in all_notified:
+        by_user.setdefault(nm.telegram_chat_id, []).append(nm)
+
+    def sort_key(u: User):
+        _, _, _, _, pts = _stats(by_user.get(u.telegram_chat_id, []))
+        return pts
+
+    ranked = sorted(users, key=sort_key, reverse=True)
+
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    lines = ["🏆 <b>Standings</b>\n"]
+    for i, u in enumerate(ranked, 1):
+        _, sign_only, goal_diff, exact, pts = _stats(by_user.get(u.telegram_chat_id, []))
+        prefix = medals.get(i, f"{i}.")
+        lines.append(f"{prefix} <b>{u.name}</b>  ⭐ {pts} pts  {_stats_line(sign_only, goal_diff, exact)}")
+
+    await send_message(bot_token, chat_id, "\n".join(lines))
+
+
 async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
     message = update.get("message", {})
     text = (message.get("text") or "").strip()
@@ -347,6 +399,8 @@ async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
         await _handle_predictions(chat_id, bot_token)
     elif cmd == "/results":
         await _handle_results(chat_id, bot_token)
+    elif cmd == "/rank":
+        await _handle_standings(chat_id, bot_token)
     elif cmd == "/users":
         await _handle_users(chat_id, bot_token, admin_chat_id)
     elif cmd == "/chatid":

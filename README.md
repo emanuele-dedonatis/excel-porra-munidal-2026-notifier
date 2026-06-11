@@ -185,6 +185,7 @@ To update your predictions (e.g. after filling in knockout stage picks), just re
 | Command | Who | Description |
 |---------|-----|-------------|
 | `/chatid` | anyone | Returns your Telegram chat ID |
+| `/rank` | registered users | Group leaderboard ranked by total points |
 | `/predictions` | registered users | Full predictions list ordered by kickoff time, with scores and points for finished matches |
 | `/results` | registered users | Finished matches only, with prediction outcome and points earned |
 | `/status` | registered users | Summary: correct/exact counts and total points accumulated |
