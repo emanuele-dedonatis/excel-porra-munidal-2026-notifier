@@ -2,7 +2,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import inspect, text
@@ -10,8 +10,9 @@ from sqlalchemy.orm import Session
 
 from . import models  # ensure models are registered before create_all
 from .config import get_settings
-from .database import Base, engine, get_db
+from .database import Base, SessionLocal, engine
 from .excel_parser import parse_name, parse_predictions, to_json
+from .notifier import send_message
 from .scheduler import seed_past_matches, start_scheduler, stop_scheduler
 from .telegram_bot import polling_loop, send_predictions_to_user, notify_admin_new_user
 
@@ -81,13 +82,54 @@ async def index(request: Request):
     return templates.TemplateResponse(request, "index.html")
 
 
+async def _process_registration(telegram_chat_id: str, file_bytes: bytes):
+    settings = get_settings()
+
+    try:
+        predictions = parse_predictions(file_bytes)
+        name = parse_name(file_bytes) or "Unknown"
+    except Exception as e:
+        logger.error(f"Excel parse error for {telegram_chat_id}: {e}")
+        if settings.telegram_bot_token:
+            await send_message(settings.telegram_bot_token, telegram_chat_id,
+                               f"❌ Could not parse your Excel file.\n{e}\n\nPlease check the file and try again.")
+        return
+
+    if not predictions:
+        if settings.telegram_bot_token:
+            await send_message(settings.telegram_bot_token, telegram_chat_id,
+                               "❌ No predictions found in your Excel file. Make sure you're uploading the right file.")
+        return
+
+    predictions_json = to_json(predictions)
+
+    db = SessionLocal()
+    try:
+        user = db.query(models.User).filter_by(telegram_chat_id=telegram_chat_id).first()
+        is_new = user is None
+        if user:
+            user.name = name
+            user.predictions = predictions_json
+        else:
+            user = models.User(name=name, telegram_chat_id=telegram_chat_id, predictions=predictions_json)
+            db.add(user)
+        db.commit()
+    finally:
+        db.close()
+
+    if is_new:
+        await seed_past_matches(telegram_chat_id)
+    if settings.telegram_bot_token:
+        await send_predictions_to_user(telegram_chat_id, settings.telegram_bot_token)
+        if settings.admin_telegram_chat_id:
+            await notify_admin_new_user(settings.admin_telegram_chat_id, settings.telegram_bot_token, name, telegram_chat_id, is_new)
+
+
 @app.post("/register")
 async def register(
     telegram_chat_id: str = Form(...),
     excel_file: UploadFile = File(...),
-    db: Session = Depends(get_db),
 ):
-    settings = get_settings()
     if not (excel_file.filename or "").endswith((".xlsx", ".xls")):
         raise HTTPException(400, "Please upload an Excel file (.xlsx or .xls)")
 
@@ -95,46 +137,12 @@ async def register(
     if len(file_bytes) > 10 * 1024 * 1024:
         raise HTTPException(400, "File too large (max 10 MB)")
 
-    try:
-        predictions = parse_predictions(file_bytes)
-        name = parse_name(file_bytes) or "Unknown"
-    except Exception as e:
-        logger.error(f"Excel parse error: {e}")
-        raise HTTPException(400, f"Could not parse the Excel file: {e}")
-
-    if not predictions:
-        raise HTTPException(400, "No predictions found. Make sure you're uploading the right Excel file.")
-
-    predictions_json = to_json(predictions)
-
     telegram_chat_id = telegram_chat_id.strip()
-    user = db.query(models.User).filter_by(telegram_chat_id=telegram_chat_id).first()
-    is_new = user is None
+    if not telegram_chat_id.lstrip("-").isdigit():
+        raise HTTPException(400, "Invalid Telegram chat ID — must be a numeric ID.")
 
-    if user:
-        user.name = name
-        user.predictions = predictions_json
-    else:
-        user = models.User(name=name, telegram_chat_id=telegram_chat_id, predictions=predictions_json)
-        db.add(user)
-    db.commit()
-
-    async def _post_register():
-        if is_new:
-            await seed_past_matches(telegram_chat_id)
-        if settings.telegram_bot_token:
-            await send_predictions_to_user(telegram_chat_id, settings.telegram_bot_token)
-            if settings.admin_telegram_chat_id:
-                await notify_admin_new_user(settings.admin_telegram_chat_id, settings.telegram_bot_token, name, telegram_chat_id, is_new)
-
-    asyncio.create_task(_post_register())
-
-    return JSONResponse({
-        "status": "ok",
-        "name": name,
-        "match_count": len(predictions_json),
-        "is_new": is_new,
-    })
+    asyncio.create_task(_process_registration(telegram_chat_id, file_bytes))
+    return JSONResponse({"status": "ok"})
 
 
 @app.get("/health")

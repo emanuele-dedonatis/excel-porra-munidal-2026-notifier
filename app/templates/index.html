@@ -183,11 +183,10 @@
       const data = await resp.json();
 
       if (resp.ok) {
-        const verb = data.is_new ? 'registered' : 'updated';
         result.className = 'success';
         result.innerHTML =
-          `✅ <strong>${data.name}</strong> ${verb} successfully!<br>` +
-          `You'll receive a Telegram message after each match finishes.`;
+          `✅ File received! Your predictions are being processed.<br>` +
+          `You'll get a Telegram message to confirm — or with an error if something went wrong.`;
       } else {
         result.className = 'error';
         result.textContent = '❌ ' + (data.detail || 'Something went wrong.');
