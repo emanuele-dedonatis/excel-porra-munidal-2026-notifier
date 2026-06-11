@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>WC 2026 Prediction Notifier</title>
+  <style>
+    :root {
+      --green: #00843d;
+      --green-dark: #006630;
+      --gold: #c9a84c;
+      --bg: #f4f6f8;
+      --card: #ffffff;
+      --text: #1a1a2e;
+      --muted: #6b7280;
+      --radius: 12px;
+      --shadow: 0 4px 20px rgba(0,0,0,.08);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem 4rem;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 2rem;
+    }
+    header .trophy { font-size: 3rem; line-height: 1; }
+    header h1 { font-size: 1.7rem; font-weight: 700; margin-top: .5rem; }
+    header p { color: var(--muted); margin-top: .4rem; font-size: .95rem; }
+
+    .card {
+      background: var(--card);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 2rem;
+      width: 100%;
+      max-width: 520px;
+    }
+
+    .steps {
+      display: flex;
+      flex-direction: column;
+      gap: .75rem;
+      margin-bottom: 2rem;
+      background: #f0faf4;
+      border: 1px solid #c3e6d3;
+      border-radius: 8px;
+      padding: 1.2rem 1.4rem;
+    }
+    .steps h3 { font-size: .85rem; text-transform: uppercase; letter-spacing: .05em; color: var(--green); margin-bottom: .25rem; }
+    .step { display: flex; gap: .75rem; align-items: flex-start; font-size: .9rem; }
+    .step-num {
+      background: var(--green);
+      color: #fff;
+      border-radius: 50%;
+      width: 22px; height: 22px;
+      flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center;
+      font-size: .75rem; font-weight: 700;
+    }
+    .step a { color: var(--green-dark); }
+
+    form { display: flex; flex-direction: column; gap: 1.2rem; }
+
+    label { font-size: .88rem; font-weight: 600; color: var(--text); display: block; margin-bottom: .35rem; }
+    label span { font-weight: 400; color: var(--muted); font-size: .82rem; }
+
+    input[type="text"], input[type="file"] {
+      width: 100%;
+      padding: .6rem .85rem;
+      border: 1.5px solid #d1d5db;
+      border-radius: 8px;
+      font-size: .95rem;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input[type="text"]:focus { border-color: var(--green); }
+
+    .file-hint { font-size: .8rem; color: var(--muted); margin-top: .3rem; }
+
+    button[type="submit"] {
+      background: var(--green);
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: .75rem 1.5rem;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background .15s;
+      margin-top: .5rem;
+    }
+    button[type="submit"]:hover { background: var(--green-dark); }
+    button[type="submit"]:disabled { background: #9ca3af; cursor: not-allowed; }
+
+    #result {
+      display: none;
+      margin-top: 1.25rem;
+      padding: 1rem 1.2rem;
+      border-radius: 8px;
+      font-size: .93rem;
+      line-height: 1.5;
+    }
+    #result.success { background: #ecfdf5; border: 1px solid #6ee7b7; color: #065f46; }
+    #result.error   { background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; }
+
+    footer { margin-top: 2.5rem; text-align: center; font-size: .8rem; color: var(--muted); }
+    footer a { color: var(--muted); }
+  </style>
+</head>
+<body>
+
+<header>
+  <div class="trophy">🏆</div>
+  <h1>WC 2026 Prediction Notifier</h1>
+  <p>Get a Telegram message every time a match ends — with your prediction result.</p>
+</header>
+
+<div class="card">
+  <div class="steps">
+    <h3>How to set up</h3>
+    <div class="step">
+      <div class="step-num">1</div>
+      <div>Create the bot: message <a href="https://t.me/BotFather" target="_blank">@BotFather</a> on Telegram and send <code>/newbot</code>. Copy the token — the admin of this group needs it.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">2</div>
+      <div>Get your personal chat ID: message <a href="https://t.me/userinfobot" target="_blank">@userinfobot</a> on Telegram. It replies instantly with your numeric ID.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">3</div>
+      <div>Start the bot: send any message to the bot so it can reach you.</div>
+    </div>
+    <div class="step">
+      <div class="step-num">4</div>
+      <div>Fill in the form below and upload your Excel predictions file.</div>
+    </div>
+  </div>
+
+  <form id="reg-form">
+    <div>
+      <label for="name">Your name</label>
+      <input type="text" id="name" name="name" placeholder="e.g. Emanuele" required />
+    </div>
+
+    <div>
+      <label for="chat_id">
+        Telegram chat ID
+        <span>— the number you got from @userinfobot</span>
+      </label>
+      <input type="text" id="chat_id" name="telegram_chat_id" placeholder="e.g. 123456789" required />
+    </div>
+
+    <div>
+      <label for="excel">
+        Excel predictions file
+        <span>— your completed <em>Excel Porra Mundial</em> .xlsx</span>
+      </label>
+      <input type="file" id="excel" name="excel_file" accept=".xlsx,.xls" required />
+      <div class="file-hint">The file stays on the server only to read your predictions — it is not shared with anyone.</div>
+    </div>
+
+    <button type="submit" id="submit-btn">Register / Update predictions</button>
+
+    <div id="result"></div>
+  </form>
+</div>
+
+<footer>
+  Built with ❤️ for the group &nbsp;·&nbsp;
+  <a href="https://github.com/emanuele-dedonatis/excel-porra-munidal-2026-notifier" target="_blank">GitHub</a>
+  &nbsp;·&nbsp;
+  <a href="https://matejero.es/excel-porra-mundial/" target="_blank">Excel Porra Mundial</a>
+</footer>
+
+<script>
+  document.getElementById('reg-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById('submit-btn');
+    const result = document.getElementById('result');
+    btn.disabled = true;
+    btn.textContent = 'Registering…';
+    result.style.display = 'none';
+
+    const formData = new FormData(e.target);
+
+    try {
+      const resp = await fetch('/register', { method: 'POST', body: formData });
+      const data = await resp.json();
+
+      if (resp.ok) {
+        const verb = data.is_new ? 'registered' : 'updated';
+        result.className = 'success';
+        result.innerHTML =
+          `✅ <strong>${data.name}</strong> ${verb} successfully!<br>` +
+          `Found <strong>${data.match_count}</strong> match predictions.<br>` +
+          `You'll receive a Telegram message after each match finishes.`;
+      } else {
+        result.className = 'error';
+        result.textContent = '❌ ' + (data.detail || 'Something went wrong.');
+      }
+    } catch (err) {
+      result.className = 'error';
+      result.textContent = '❌ Network error — please try again.';
+    }
+
+    result.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Register / Update predictions';
+  });
+</script>
+</body>
+</html>
