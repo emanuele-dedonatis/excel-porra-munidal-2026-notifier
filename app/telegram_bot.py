@@ -126,7 +126,7 @@ def _build_nm_lookup(notified: list[NotifiedMatch]) -> dict:
     return lookup
 
 
-def _prediction_line(match_num: int, pred: dict, nm_lookup: dict) -> str:
+def _prediction_line(pred: dict, nm_lookup: dict) -> str:
     home_es = pred.get("home_team", "?")
     away_es = pred.get("away_team", "?")
     prediction = pred.get("prediction") or "—"
@@ -134,6 +134,15 @@ def _prediction_line(match_num: int, pred: dict, nm_lookup: dict) -> str:
     pred_ag = pred.get("predicted_away_goals")
 
     pred_label = _prediction_label(prediction, home_es, away_es, pred_hg, pred_ag)
+
+    kickoff_str = "?"
+    kickoff_iso = pred.get("kickoff_utc")
+    if kickoff_iso:
+        try:
+            dt = datetime.fromisoformat(kickoff_iso)
+            kickoff_str = dt.strftime("%d %b %H:%M")
+        except (ValueError, TypeError):
+            pass
 
     # Look up finished match by mapped English team names
     home_en = normalize(spanish_to_english(home_es))
@@ -144,9 +153,9 @@ def _prediction_line(match_num: int, pred: dict, nm_lookup: dict) -> str:
         score = f"{nm.home_score}–{nm.away_score}"
         suffix = {"EXTRA_TIME": " aet", "PENALTY_SHOOTOUT": " pens"}.get(nm.duration or "", "")
         mark = {2: "🎯", 1: "✅", 0: "❌"}.get(nm.correct, "⚪")
-        return f"{mark} {match_num:>3}. {nm.home_team} {score}{suffix} {nm.away_team}  › {pred_label}"
+        return f"{mark} {kickoff_str} {nm.home_team} {score}{suffix} {nm.away_team}  › {pred_label}"
     else:
-        return f"⚪ {match_num:>3}. {home_es} vs {away_es}  › {pred_label}"
+        return f"⚪ {kickoff_str} {home_es} vs {away_es}  › {pred_label}"
 
 
 def _chunk_messages(lines: list[str], max_len: int = _MAX_MSG) -> list[str]:
@@ -174,18 +183,28 @@ _KNOCKOUT_ROUNDS = [
 ]
 
 
+def _kickoff_dt(pred: dict) -> datetime:
+    iso = pred.get("kickoff_utc")
+    if iso:
+        try:
+            return datetime.fromisoformat(iso)
+        except (ValueError, TypeError):
+            pass
+    return datetime.min.replace(tzinfo=timezone.utc)
+
+
 def _build_predictions(user: User, notified: list[NotifiedMatch]) -> list[str]:
     nm_lookup = _build_nm_lookup(notified)
     preds = user.predictions or {}
-    sorted_preds = sorted((int(k), v) for k, v in preds.items())
+    sorted_preds = sorted(((int(k), v) for k, v in preds.items()), key=lambda x: _kickoff_dt(x[1]))
 
     all_messages: list[str] = []
 
     # --- Group stage ---
     group_preds = [(n, p) for n, p in sorted_preds if n <= 72]
     lines = ["🏟 <b>Group Stage</b>"]
-    for match_num, pred in group_preds:
-        lines.append(_prediction_line(match_num, pred, nm_lookup))
+    for _match_num, pred in group_preds:
+        lines.append(_prediction_line(pred, nm_lookup))
     all_messages.extend(_chunk_messages(lines))
 
     # --- Knockout rounds ---
@@ -194,8 +213,8 @@ def _build_predictions(user: User, notified: list[NotifiedMatch]) -> list[str]:
         if not round_preds:
             continue
         lines = [title]
-        for match_num, pred in round_preds:
-            lines.append(_prediction_line(match_num, pred, nm_lookup))
+        for _match_num, pred in round_preds:
+            lines.append(_prediction_line(pred, nm_lookup))
         all_messages.extend(_chunk_messages(lines))
 
     return all_messages
