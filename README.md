@@ -75,6 +75,27 @@ docker compose up -d
 
 The `data/` directory is mounted as a volume so the database survives container restarts.
 
+#### HTTPS with Nginx (optional)
+
+HTTPS is handled by an optional Nginx container using the `https` Docker Compose profile. You need your own certificate files (e.g. from Let's Encrypt or a CA).
+
+1. Add the following to your `.env`:
+
+   ```env
+   SSL_CERT=/path/to/fullchain.pem
+   SSL_KEY=/path/to/privkey.pem
+   ```
+
+2. Start with the `https` profile:
+
+   ```bash
+   docker compose --profile https up -d
+   ```
+
+   Nginx listens on ports `80` (redirects to HTTPS) and `443` (proxies to the app). To use non-standard ports, set `HTTP_PORT` and `HTTPS_PORT` in `.env`.
+
+Without the `https` profile, only the app is started (plain HTTP on port `8000`, or `APP_PORT` if set).
+
 ---
 
 ## Environment variables
@@ -87,6 +108,11 @@ The `data/` directory is mounted as a volume so the database survives container 
 | `DATABASE_URL` | SQLite path | `sqlite:///./data/app.db` |
 | `POLL_INTERVAL_SECONDS` | How often to check for results | `300` (5 min) |
 | `DEBUG` | Enable FastAPI debug mode | `false` |
+| `APP_PORT` | Host port the web container is exposed on | `8000` |
+| `HTTP_PORT` | Nginx HTTP port (https profile only) | `80` |
+| `HTTPS_PORT` | Nginx HTTPS port (https profile only) | `443` |
+| `SSL_CERT` | Path to TLS certificate file (https profile only) | — |
+| `SSL_KEY` | Path to TLS private key file (https profile only) | — |
 
 ### Admin chat ID
 

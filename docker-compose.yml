@@ -2,9 +2,23 @@ services:
   web:
     build: .
     ports:
-      - "8000:8000"
+      - "${APP_PORT:-8000}:8000"
     volumes:
       - ./data:/app/data
     env_file:
       - .env
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    profiles: [https]
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ${SSL_CERT}:/etc/nginx/certs/cert.pem:ro
+      - ${SSL_KEY}:/etc/nginx/certs/key.pem:ro
+    depends_on:
+      - web
     restart: unless-stopped
