@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     football_data_api_key: str = ""
     database_url: str = "sqlite:///./data/app.db"
     poll_interval_seconds: int = 300
+    admin_telegram_chat_id: str = ""
     debug: bool = False
 
     model_config = {"env_file": ".env"}

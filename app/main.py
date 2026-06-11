@@ -13,7 +13,7 @@ from .config import get_settings
 from .database import Base, engine, get_db
 from .excel_parser import parse_predictions, to_json
 from .scheduler import seed_past_matches, start_scheduler, stop_scheduler
-from .telegram_bot import polling_loop, send_predictions_to_user
+from .telegram_bot import polling_loop, send_predictions_to_user, notify_admin_new_user
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -123,6 +123,8 @@ async def register(
             await seed_past_matches(telegram_chat_id)
         if settings.telegram_bot_token:
             await send_predictions_to_user(telegram_chat_id, settings.telegram_bot_token)
+            if is_new and settings.admin_telegram_chat_id:
+                await notify_admin_new_user(settings.admin_telegram_chat_id, settings.telegram_bot_token, name, telegram_chat_id)
 
     asyncio.create_task(_post_register())
 

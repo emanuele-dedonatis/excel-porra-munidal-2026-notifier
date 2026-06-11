@@ -293,7 +293,37 @@ async def _handle_predictions(chat_id: str, bot_token: str):
         await send_message(bot_token, chat_id, msg)
 
 
-async def _handle_update(update: dict, bot_token: str):
+async def notify_admin_new_user(admin_chat_id: str, bot_token: str, name: str, chat_id: str):
+    await send_message(
+        bot_token, admin_chat_id,
+        f"👤 <b>New user registered</b>\nName: {name}\nChat ID: <code>{chat_id}</code>"
+    )
+
+
+async def _handle_users(chat_id: str, bot_token: str, admin_chat_id: str):
+    if chat_id != admin_chat_id:
+        await send_message(bot_token, chat_id, "⛔ This command is restricted to the admin.")
+        return
+
+    db: Session = SessionLocal()
+    try:
+        users: list[User] = db.query(User).order_by(User.created_at).all()
+    finally:
+        db.close()
+
+    if not users:
+        await send_message(bot_token, chat_id, "No users registered yet.")
+        return
+
+    lines = [f"👥 <b>Registered users ({len(users)})</b>"]
+    for u in users:
+        pred_count = len(u.predictions or {})
+        lines.append(f"• {u.name}  <code>{u.telegram_chat_id}</code>  ({pred_count} predictions)")
+
+    await send_message(bot_token, chat_id, "\n".join(lines))
+
+
+async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
     message = update.get("message", {})
     text = (message.get("text") or "").strip()
     chat_id = str(message.get("chat", {}).get("id", ""))
@@ -309,6 +339,8 @@ async def _handle_update(update: dict, bot_token: str):
         await _handle_predictions(chat_id, bot_token)
     elif cmd == "/results":
         await _handle_results(chat_id, bot_token)
+    elif cmd == "/users":
+        await _handle_users(chat_id, bot_token, admin_chat_id)
     elif cmd == "/chatid":
         await send_message(bot_token, chat_id, f"Your Telegram chat ID is: <code>{chat_id}</code>")
 
@@ -334,6 +366,8 @@ async def send_predictions_to_user(chat_id: str, bot_token: str):
 
 async def polling_loop(bot_token: str):
     """Long-poll Telegram for bot commands. Runs as a background asyncio task."""
+    from .config import get_settings
+    admin_chat_id = get_settings().admin_telegram_chat_id
     logger.info("Telegram bot polling started")
     offset = 0
     while True:
@@ -341,7 +375,7 @@ async def polling_loop(bot_token: str):
             updates = await _get_updates(bot_token, offset)
             for upd in updates:
                 offset = upd["update_id"] + 1
-                await _handle_update(upd, bot_token)
+                await _handle_update(upd, bot_token, admin_chat_id)
         except asyncio.CancelledError:
             logger.info("Telegram bot polling stopped")
             break
