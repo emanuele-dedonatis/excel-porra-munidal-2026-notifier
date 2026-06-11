@@ -3,6 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 import httpx
+from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
@@ -31,13 +32,9 @@ async def _get_updates(bot_token: str, offset: int) -> list[dict]:
 
 
 def _build_status(user: User, notified: list[NotifiedMatch]) -> str:
-    total_preds = len(user.predictions or {})
     finished = [n for n in notified if n.home_team and n.away_team]
 
-    lines = [
-        f"📊 <b>WC 2026 — {user.name}</b>",
-        f"📋 Predictions loaded: <b>{total_preds} matches</b>",
-    ]
+    lines = [f"📊 <b>WC 2026 — {user.name}</b>"]
 
     if not finished:
         lines.append("\nNo matches finished yet — stay tuned! ⏳")
@@ -47,10 +44,12 @@ def _build_status(user: User, notified: list[NotifiedMatch]) -> str:
     correct_count = sum(1 for n in finished if (n.correct or 0) >= 1)
     exact_count = sum(1 for n in finished if (n.correct or 0) == 2)
 
+    total_pts = sum(n.points or 0 for n in finished)
     lines.append(
         f"🏆 Results: <b>{correct_count}/{total_f}</b> correct"
         + (f"  ({exact_count} exact 🎯)" if exact_count else "")
     )
+    lines.append(f"⭐ Total points: <b>{total_pts} pts</b>")
     lines.append("")
 
     for n in sorted(finished, key=lambda x: x.notified_at or datetime.min.replace(tzinfo=timezone.utc)):
@@ -153,7 +152,8 @@ def _prediction_line(pred: dict, nm_lookup: dict) -> str:
         score = f"{nm.home_score}–{nm.away_score}"
         suffix = {"EXTRA_TIME": " aet", "PENALTY_SHOOTOUT": " pens"}.get(nm.duration or "", "")
         mark = {2: "🎯", 1: "✅", 0: "❌"}.get(nm.correct, "⚪")
-        return f"{mark} {kickoff_str} {nm.home_team} {score}{suffix} {nm.away_team}  › {pred_label}"
+        pts_str = f"  +{nm.points} pts" if nm.points is not None else ""
+        return f"{mark} {kickoff_str} {nm.home_team} {score}{suffix} {nm.away_team}  › {pred_label}{pts_str}"
     else:
         return f"⚪ {kickoff_str} {home_es} vs {away_es}  › {pred_label}"
 
@@ -308,6 +308,13 @@ async def _handle_users(chat_id: str, bot_token: str, admin_chat_id: str):
     db: Session = SessionLocal()
     try:
         users: list[User] = db.query(User).order_by(User.created_at).all()
+        user_pts = {
+            chat_id_: pts or 0
+            for chat_id_, pts in db.query(
+                NotifiedMatch.telegram_chat_id,
+                sa_func.sum(NotifiedMatch.points),
+            ).group_by(NotifiedMatch.telegram_chat_id).all()
+        }
     finally:
         db.close()
 
@@ -317,8 +324,8 @@ async def _handle_users(chat_id: str, bot_token: str, admin_chat_id: str):
 
     lines = [f"👥 <b>Registered users ({len(users)})</b>"]
     for u in users:
-        pred_count = len(u.predictions or {})
-        lines.append(f"• {u.name}  <code>{u.telegram_chat_id}</code>  ({pred_count} predictions)")
+        pts = user_pts.get(u.telegram_chat_id, 0)
+        lines.append(f"• {u.name}  <code>{u.telegram_chat_id}</code>  ⭐ {pts} pts")
 
     await send_message(bot_token, chat_id, "\n".join(lines))
 

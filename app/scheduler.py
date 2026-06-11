@@ -3,6 +3,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from .config import get_settings
@@ -10,7 +11,7 @@ from .database import SessionLocal
 from .espn_api import fetch_score
 from .football_api import APIMatch, get_finished_matches
 from .models import NotifiedMatch, User
-from .notifier import build_message, correct_value, send_message
+from .notifier import build_message, calculate_points, correct_value, send_message
 from .team_names import names_match
 
 logger = logging.getLogger(__name__)
@@ -95,11 +96,24 @@ async def _process_finished_matches():
                 if pred is None:
                     continue
 
+                sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
+                pts = calculate_points(
+                    pred["prediction"], match,
+                    pred.get("predicted_home_goals"),
+                    pred.get("predicted_away_goals"),
+                    sign_pts, goal_diff_pts, exact_pts,
+                )
+                existing_pts = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
+                    telegram_chat_id=user.telegram_chat_id,
+                ).scalar() or 0
+
                 text = build_message(
                     match=match,
                     prediction=pred["prediction"],
                     predicted_home_goals=pred.get("predicted_home_goals"),
                     predicted_away_goals=pred.get("predicted_away_goals"),
+                    points=pts,
+                    total_points=existing_pts + pts,
                 )
                 sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
                 if sent:
@@ -120,6 +134,7 @@ async def _process_finished_matches():
                         predicted_home_goals=pred.get("predicted_home_goals"),
                         predicted_away_goals=pred.get("predicted_away_goals"),
                         correct=cv,
+                        points=pts,
                     ))
                     db.commit()
                     logger.info(f"Notified {user.name} for match {match.home_team} vs {match.away_team}")

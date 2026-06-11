@@ -32,6 +32,7 @@ def _migrate_db():
             "predicted_home_goals": "INTEGER",
             "predicted_away_goals": "INTEGER",
             "correct": "INTEGER",
+            "points": "INTEGER",
         }
     }
     inspector = inspect(engine)

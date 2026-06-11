@@ -57,11 +57,37 @@ def correct_value(
     return 2 if is_exact_score(predicted_home_goals, predicted_away_goals, match) else 1
 
 
+def calculate_points(
+    prediction: str,
+    match: APIMatch,
+    predicted_home_goals: Optional[int],
+    predicted_away_goals: Optional[int],
+    points_sign: int,
+    points_goal_diff: int,
+    points_exact: int,
+) -> int:
+    """Calculate points earned for this match prediction."""
+    if not is_correct(prediction, match):
+        return 0
+    pts = points_sign
+    if (predicted_home_goals is not None and predicted_away_goals is not None
+            and match.home_score is not None and match.away_score is not None):
+        pred_diff = predicted_home_goals - predicted_away_goals
+        actual_diff = match.home_score - match.away_score
+        if pred_diff == actual_diff:
+            pts += points_goal_diff
+            if predicted_home_goals == match.home_score and predicted_away_goals == match.away_score:
+                pts += points_exact
+    return pts
+
+
 def build_message(
     match: APIMatch,
     prediction: str,
     predicted_home_goals: Optional[int],
     predicted_away_goals: Optional[int],
+    points: int,
+    total_points: int,
 ) -> str:
     cv = correct_value(prediction, match, predicted_home_goals, predicted_away_goals)
     correct = cv >= 1
@@ -86,17 +112,17 @@ def build_message(
         pred_text += f" ({predicted_home_goals}–{predicted_away_goals})"
 
     if exact:
-        verdict = "Exact score! 🎯"
+        verdict = f"Exact score! 🎯  <b>+{points} pts</b>"
     elif correct:
-        verdict = "Correct result! ✅"
+        verdict = f"Correct result! ✅  <b>+{points} pts</b>"
     else:
-        verdict = "Wrong prediction ❌"
+        verdict = f"Wrong prediction ❌  +0 pts"
 
     return (
         f"⚽ <b>Match finished</b>\n"
         f"<b>{result_line}</b>\n\n"
         f"Your prediction: {pred_text}\n"
-        f"{verdict}"
+        f"{verdict}  (total: {total_points} pts)"
     )
 
 

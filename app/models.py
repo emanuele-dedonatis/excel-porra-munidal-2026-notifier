@@ -35,6 +35,7 @@ class NotifiedMatch(Base):
     predicted_away_goals = Column(Integer)
     # 0 = wrong, 1 = correct result, 2 = exact score
     correct = Column(Integer)
+    points = Column(Integer)   # actual points earned (based on group's scoring config)
     notified_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (UniqueConstraint("telegram_chat_id", "api_match_id"),)

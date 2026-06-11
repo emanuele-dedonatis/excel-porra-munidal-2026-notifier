@@ -129,9 +129,36 @@ Without the `https` profile, only the app is started (plain HTTP on port `8000`,
 Set `ADMIN_TELEGRAM_CHAT_ID` to your personal Telegram chat ID to unlock two things:
 
 - **New-user alerts** — you get a Telegram message whenever someone registers, including their name and chat ID.
-- **`/users` command** — send `/users` to the bot to see the full list of registered users (name, chat ID, number of predictions loaded). Any other user who tries `/users` gets a permission-denied reply.
+- **`/users` command** — send `/users` to the bot to see the full list of registered users with their total points. Any other user who tries `/users` gets a permission-denied reply.
 
 To find your chat ID, start the bot and send it `/chatid`.
+
+### Scoring
+
+Points are awarded per match and are configurable per tournament stage. The default scoring matches the standard Porra Mundial rules:
+
+| Points for… | Default |
+|-------------|---------|
+| Correct sign (1X2) | 1 |
+| Correct goal difference (sign must be correct) | 1 |
+| Exact score (in addition to the above) | 2 |
+| **Max per match** | **4** |
+
+Points are **cumulative**: a correct sign earns 1 pt; same goal difference adds 1 more; exact score adds 2 more (total 4 pts).
+
+Each tournament stage can have independent values via env vars:
+
+```
+POINTS_GROUP_SIGN / POINTS_GROUP_GOAL_DIFF / POINTS_GROUP_EXACT
+POINTS_R32_SIGN   / POINTS_R32_GOAL_DIFF   / POINTS_R32_EXACT
+POINTS_R16_SIGN   / POINTS_R16_GOAL_DIFF   / POINTS_R16_EXACT
+POINTS_QF_SIGN    / POINTS_QF_GOAL_DIFF    / POINTS_QF_EXACT
+POINTS_SF_SIGN    / POINTS_SF_GOAL_DIFF    / POINTS_SF_EXACT
+POINTS_3RD_SIGN   / POINTS_3RD_GOAL_DIFF   / POINTS_3RD_EXACT
+POINTS_FINAL_SIGN / POINTS_FINAL_GOAL_DIFF / POINTS_FINAL_EXACT
+```
+
+All default to `1 / 1 / 2`. Only set the ones that differ from your group's rules.
 
 ---
 
@@ -158,10 +185,10 @@ To update your predictions (e.g. after filling in knockout stage picks), just re
 | Command | Who | Description |
 |---------|-----|-------------|
 | `/chatid` | anyone | Returns your Telegram chat ID |
-| `/predictions` | registered users | Full predictions list with results where available |
-| `/results` | registered users | Finished matches only, with your prediction outcome |
-| `/status` | registered users | Score summary (correct/exact counts) |
-| `/users` | admin only | List of all registered users |
+| `/predictions` | registered users | Full predictions list ordered by kickoff time, with scores and points for finished matches |
+| `/results` | registered users | Finished matches only, with prediction outcome and points earned |
+| `/status` | registered users | Summary: correct/exact counts and total points accumulated |
+| `/users` | admin only | All registered users with their total points |
 
 ---
 
@@ -172,15 +199,15 @@ To update your predictions (e.g. after filling in knockout stage picks), just re
 España 2–1 Francia
 
 Your prediction: España wins (2–1)
-Exact score! 🎯
+Exact score! 🎯  +4 pts  (total: 12 pts)
 ```
 
 ```
 ⚽ Match finished
 Brasil 1–2 Argentina
 
-Your prediction: Brasil wins
-Wrong prediction ❌
+Your prediction: Brasil wins (1–1)
+Wrong prediction ❌  +0 pts  (total: 8 pts)
 ```
 
 ---
