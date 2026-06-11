@@ -293,10 +293,11 @@ async def _handle_predictions(chat_id: str, bot_token: str):
         await send_message(bot_token, chat_id, msg)
 
 
-async def notify_admin_new_user(admin_chat_id: str, bot_token: str, name: str, chat_id: str):
+async def notify_admin_new_user(admin_chat_id: str, bot_token: str, name: str, chat_id: str, is_new: bool = True):
+    label = "New user registered" if is_new else "User updated predictions"
     await send_message(
         bot_token, admin_chat_id,
-        f"👤 <b>New user registered</b>\nName: {name}\nChat ID: <code>{chat_id}</code>"
+        f"👤 <b>{label}</b>\nName: {name}\nChat ID: <code>{chat_id}</code>"
     )
 
 

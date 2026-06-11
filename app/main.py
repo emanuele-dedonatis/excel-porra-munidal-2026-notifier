@@ -124,8 +124,8 @@ async def register(
             await seed_past_matches(telegram_chat_id)
         if settings.telegram_bot_token:
             await send_predictions_to_user(telegram_chat_id, settings.telegram_bot_token)
-            if is_new and settings.admin_telegram_chat_id:
-                await notify_admin_new_user(settings.admin_telegram_chat_id, settings.telegram_bot_token, name, telegram_chat_id)
+            if settings.admin_telegram_chat_id:
+                await notify_admin_new_user(settings.admin_telegram_chat_id, settings.telegram_bot_token, name, telegram_chat_id, is_new)
 
     asyncio.create_task(_post_register())
 
