@@ -234,6 +234,8 @@ async def _handle_update(update: dict, bot_token: str):
         await _handle_status(chat_id, bot_token)
     elif cmd == "/predictions":
         await _handle_predictions(chat_id, bot_token)
+    elif cmd == "/chatid":
+        await send_message(bot_token, chat_id, f"Your Telegram chat ID is: <code>{chat_id}</code>")
 
 
 async def send_predictions_to_user(chat_id: str, bot_token: str):
