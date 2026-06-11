@@ -220,6 +220,60 @@ def _build_predictions(user: User, notified: list[NotifiedMatch]) -> list[str]:
     return all_messages
 
 
+def _build_results(user: User, notified: list[NotifiedMatch]) -> list[str]:
+    nm_lookup = _build_nm_lookup(notified)
+    preds = user.predictions or {}
+    sorted_preds = sorted(((int(k), v) for k, v in preds.items()), key=lambda x: _kickoff_dt(x[1]))
+
+    def is_finished(pred: dict) -> bool:
+        home_en = normalize(spanish_to_english(pred.get("home_team", "")))
+        away_en = normalize(spanish_to_english(pred.get("away_team", "")))
+        nm = nm_lookup.get((home_en, away_en))
+        return nm is not None and nm.home_score is not None
+
+    all_messages: list[str] = []
+
+    group_preds = [(n, p) for n, p in sorted_preds if n <= 72 and is_finished(p)]
+    if group_preds:
+        lines = ["🏟 <b>Group Stage</b>"]
+        for _match_num, pred in group_preds:
+            lines.append(_prediction_line(pred, nm_lookup))
+        all_messages.extend(_chunk_messages(lines))
+
+    for title, rng in _KNOCKOUT_ROUNDS:
+        round_preds = [(n, p) for n, p in sorted_preds if n in rng and is_finished(p)]
+        if not round_preds:
+            continue
+        lines = [title]
+        for _match_num, pred in round_preds:
+            lines.append(_prediction_line(pred, nm_lookup))
+        all_messages.extend(_chunk_messages(lines))
+
+    if not all_messages:
+        all_messages = ["No finished matches yet — stay tuned! ⏳"]
+
+    return all_messages
+
+
+async def _handle_results(chat_id: str, bot_token: str):
+    db: Session = SessionLocal()
+    try:
+        user = db.query(User).filter_by(telegram_chat_id=chat_id).first()
+        if not user:
+            await send_message(
+                bot_token, chat_id,
+                "⚠️ You're not registered yet.\nVisit the app to upload your Excel predictions."
+            )
+            return
+        notified = db.query(NotifiedMatch).filter_by(telegram_chat_id=chat_id).all()
+        messages = _build_results(user, notified)
+    finally:
+        db.close()
+
+    for msg in messages:
+        await send_message(bot_token, chat_id, msg)
+
+
 async def _handle_predictions(chat_id: str, bot_token: str):
     db: Session = SessionLocal()
     try:
@@ -253,6 +307,8 @@ async def _handle_update(update: dict, bot_token: str):
         await _handle_status(chat_id, bot_token)
     elif cmd == "/predictions":
         await _handle_predictions(chat_id, bot_token)
+    elif cmd == "/results":
+        await _handle_results(chat_id, bot_token)
     elif cmd == "/chatid":
         await send_message(bot_token, chat_id, f"Your Telegram chat ID is: <code>{chat_id}</code>")
 
