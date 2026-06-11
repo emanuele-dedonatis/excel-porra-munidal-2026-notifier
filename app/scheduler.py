@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from .config import get_settings
 from .database import SessionLocal
+from .espn_api import fetch_score
 from .football_api import APIMatch, get_finished_matches
 from .models import NotifiedMatch, User
 from .notifier import build_message, correct_value, send_message
@@ -76,7 +77,11 @@ async def _process_finished_matches():
 
         for match in finished:
             if match.home_score is None or match.away_score is None:
-                continue
+                espn = await fetch_score(match.home_team, match.away_team, match.kickoff_utc)
+                if espn is None:
+                    continue
+                match.home_score, match.away_score = espn
+                logger.info(f"ESPN fallback score for {match.home_team} vs {match.away_team}: {espn[0]}–{espn[1]}")
 
             for user in users:
                 already = db.query(NotifiedMatch).filter_by(

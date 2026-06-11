@@ -19,6 +19,7 @@ env/
 .vscode/
 .idea/
 *.swp
+.claude/
 
 # Data (SQLite DB, uploads)
 data/*.db
