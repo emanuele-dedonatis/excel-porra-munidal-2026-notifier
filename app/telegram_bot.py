@@ -387,6 +387,29 @@ async def _handle_standings(chat_id: str, bot_token: str):
     await send_message(bot_token, chat_id, "\n".join(lines))
 
 
+async def _handle_delete(chat_id: str, bot_token: str, admin_chat_id: str, args: str):
+    if chat_id != admin_chat_id:
+        await send_message(bot_token, chat_id, "⛔ This command is only available to the admin.")
+        return
+    target = args.strip()
+    if not target:
+        await send_message(bot_token, chat_id, "Usage: /delete &lt;chat_id&gt;")
+        return
+    db: Session = SessionLocal()
+    try:
+        user = db.query(User).filter_by(telegram_chat_id=target).first()
+        if not user:
+            await send_message(bot_token, chat_id, f"❌ No user found with chat ID <code>{target}</code>.")
+            return
+        name = user.name
+        nm_count = db.query(NotifiedMatch).filter_by(telegram_chat_id=target).delete()
+        db.delete(user)
+        db.commit()
+    finally:
+        db.close()
+    await send_message(bot_token, chat_id, f"🗑 Deleted user <b>{name}</b> (<code>{target}</code>) and {nm_count} match record(s).")
+
+
 async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
     message = update.get("message", {})
     text = (message.get("text") or "").strip()
@@ -395,7 +418,9 @@ async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
     if not text.startswith("/") or not chat_id:
         return
 
-    cmd = text.split("@")[0].split()[0]  # "/status@BotName arg" → "/status"
+    parts = text.split("@")[0].split()
+    cmd = parts[0]
+    args = " ".join(parts[1:])
 
     if cmd == "/status":
         await _handle_status(chat_id, bot_token)
@@ -407,6 +432,8 @@ async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
         await _handle_standings(chat_id, bot_token)
     elif cmd == "/users":
         await _handle_users(chat_id, bot_token, admin_chat_id)
+    elif cmd == "/delete":
+        await _handle_delete(chat_id, bot_token, admin_chat_id, args)
     elif cmd == "/chatid":
         await send_message(bot_token, chat_id, f"Your Telegram chat ID is: <code>{chat_id}</code>")
 

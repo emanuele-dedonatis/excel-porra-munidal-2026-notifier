@@ -126,10 +126,13 @@ Without the `https` profile, only the app is started (plain HTTP on port `8000`,
 
 ### Admin chat ID
 
-Set `ADMIN_TELEGRAM_CHAT_ID` to your personal Telegram chat ID to unlock two things:
+Set `ADMIN_TELEGRAM_CHAT_ID` to your personal Telegram chat ID to unlock:
 
-- **New-user alerts** — you get a Telegram message whenever someone registers, including their name and chat ID.
-- **`/users` command** — send `/users` to the bot to see the full list of registered users with their total points. Any other user who tries `/users` gets a permission-denied reply.
+- **New-user alerts** — you get a Telegram message whenever someone registers or updates their predictions, including their name and chat ID.
+- **`/users` command** — full list of registered users with their total points.
+- **`/delete <chat_id>` command** — remove a user and all their match history from the database (useful for re-registration or testing).
+
+Any other user who tries these commands gets a permission-denied reply.
 
 To find your chat ID, start the bot and send it `/chatid`.
 
@@ -185,11 +188,12 @@ To update your predictions (e.g. after filling in knockout stage picks), just re
 | Command | Who | Description |
 |---------|-----|-------------|
 | `/chatid` | anyone | Returns your Telegram chat ID |
-| `/rank` | registered users | Group leaderboard ranked by total points |
-| `/predictions` | registered users | Full predictions list ordered by kickoff time, with scores and points for finished matches |
+| `/rank` | registered users | Group leaderboard ranked by total points, with ✅ ⚽ 🎯 ❌ breakdown per user |
+| `/predictions` | registered users | Full predictions list ordered by kickoff time (in your local timezone), with scores and points for finished matches |
 | `/results` | registered users | Finished matches only, with prediction outcome and points earned |
-| `/status` | registered users | Summary: correct/exact counts and total points accumulated |
+| `/status` | registered users | Points summary with ✅ sign / ⚽ goal diff / 🎯 exact / ❌ wrong counts |
 | `/users` | admin only | All registered users with their total points |
+| `/delete <chat_id>` | admin only | Remove a user and all their match records from the database |
 
 ---
 
@@ -225,9 +229,14 @@ The app reads predictions from the **WORLDCUP** sheet of the [Excel Porra Mundia
 | AC (col 29) | Predicted home goals |
 | AD (col 30) | Predicted away goals |
 | AH (col 34) | Match number (1–104) |
-| X (col 24) | Kickoff datetime (Spain UTC+2 timezone) |
+| X (col 24) | Kickoff datetime in the user's local timezone |
 
-Kickoff times are assumed to be in **UTC+2** (Spain summer time). If you use a different timezone in the Excel's Home sheet, set `utc_offset_hours` accordingly in `excel_parser.py`.
+The app also reads from the **Home** sheet:
+
+| Cell | Content |
+|------|---------|
+| C8 | UTC offset in hours (e.g. `2` for UTC+2). Used to convert kickoff times to UTC and display them back in the user's local time. |
+| C10 | Participant's name |
 
 ---
 
