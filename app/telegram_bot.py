@@ -35,6 +35,7 @@ def _stats(matches: list[NotifiedMatch]) -> tuple[int, int, int, int, int]:
     """Return (total, sign_only, goal_diff, exact, total_pts) for a list of finished NotifiedMatches."""
     total = sign_only = goal_diff = exact = total_pts = 0
     for n in matches:
+        total += 1
         total_pts += n.points or 0
         cv = n.correct or 0
         if cv == 0:
@@ -53,8 +54,9 @@ def _stats(matches: list[NotifiedMatch]) -> tuple[int, int, int, int, int]:
     return total, sign_only, goal_diff, exact, total_pts
 
 
-def _stats_line(sign_only: int, goal_diff: int, exact: int) -> str:
-    return f"✅ {sign_only + goal_diff + exact}  ⚽ {goal_diff + exact}  🎯 {exact}"
+def _stats_line(total: int, sign_only: int, goal_diff: int, exact: int) -> str:
+    wrong = total - sign_only - goal_diff - exact
+    return f"✅ {sign_only + goal_diff + exact}  ⚽ {goal_diff + exact}  🎯 {exact}  ❌ {wrong}"
 
 
 def _build_status(user: User, notified: list[NotifiedMatch]) -> str:
@@ -68,7 +70,7 @@ def _build_status(user: User, notified: list[NotifiedMatch]) -> str:
 
     total_f = len(finished)
     _, sign_only, goal_diff, exact, total_pts = _stats(finished)
-    lines.append(_stats_line(sign_only, goal_diff, exact))
+    lines.append(_stats_line(total_f, sign_only, goal_diff, exact))
     lines.append(f"⭐ Total points: <b>{total_pts} pts</b>")
     lines.append("")
 
@@ -376,9 +378,9 @@ async def _handle_standings(chat_id: str, bot_token: str):
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     lines = ["🏆 <b>Standings</b>\n"]
     for i, u in enumerate(ranked, 1):
-        _, sign_only, goal_diff, exact, pts = _stats(by_user.get(u.telegram_chat_id, []))
+        total, sign_only, goal_diff, exact, pts = _stats(by_user.get(u.telegram_chat_id, []))
         prefix = medals.get(i, f"{i}.")
-        lines.append(f"{prefix} <b>{u.name}</b>  ⭐ {pts} pts  {_stats_line(sign_only, goal_diff, exact)}")
+        lines.append(f"{prefix} <b>{u.name}</b>  ⭐ {pts} pts\n    {_stats_line(total, sign_only, goal_diff, exact)}")
 
     await send_message(bot_token, chat_id, "\n".join(lines))
 
