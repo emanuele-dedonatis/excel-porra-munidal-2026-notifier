@@ -387,6 +387,62 @@ async def _handle_standings(chat_id: str, bot_token: str):
     await send_message(bot_token, chat_id, "\n".join(lines))
 
 
+async def _handle_last(chat_id: str, bot_token: str):
+    db: Session = SessionLocal()
+    try:
+        user = db.query(User).filter_by(telegram_chat_id=chat_id).first()
+        if not user:
+            await send_message(bot_token, chat_id,
+                               "⚠️ You're not registered yet.\nVisit the app to upload your Excel predictions.")
+            return
+
+        # Find the highest api_match_id (IDs are sequential, so highest = most recent match)
+        latest = (
+            db.query(NotifiedMatch.api_match_id)
+            .filter(NotifiedMatch.home_score.isnot(None))
+            .order_by(NotifiedMatch.api_match_id.desc())
+            .first()
+        )
+        if not latest:
+            await send_message(bot_token, chat_id, "No finished matches yet — stay tuned! ⏳")
+            return
+
+        match_id = latest[0]
+        records: list[NotifiedMatch] = db.query(NotifiedMatch).filter_by(api_match_id=match_id).all()
+        users: list[User] = db.query(User).all()
+    finally:
+        db.close()
+
+    # Grab match details from any record
+    ref = records[0]
+    score = f"{ref.home_score}–{ref.away_score}"
+    suffix = {"EXTRA_TIME": " aet", "PENALTY_SHOOTOUT": " pens"}.get(ref.duration or "", "")
+    lines = [f"⚽ <b>Last match</b>\n<b>{ref.home_team} {score}{suffix} {ref.away_team}</b>\n"]
+
+    by_chat: dict[str, NotifiedMatch] = {r.telegram_chat_id: r for r in records}
+
+    for u in sorted(users, key=lambda x: x.name):
+        nm = by_chat.get(u.telegram_chat_id)
+        if not nm:
+            lines.append(f"⚪ <b>{u.name}</b>  › no prediction")
+            continue
+        mark = {2: "🎯", 1: "✅", 0: "❌"}.get(nm.correct, "⚪")
+        if nm.prediction == "home":
+            pred_label = ref.home_team
+        elif nm.prediction == "away":
+            pred_label = ref.away_team
+        elif nm.prediction == "draw":
+            pred_label = "draw"
+        else:
+            pred_label = nm.prediction
+        if nm.predicted_home_goals is not None and nm.predicted_away_goals is not None:
+            pred_label += f" ({nm.predicted_home_goals}–{nm.predicted_away_goals})"
+        pts_str = f"  +{nm.points} pts" if nm.points is not None else ""
+        lines.append(f"{mark} <b>{u.name}</b>  › {pred_label}{pts_str}")
+
+    await send_message(bot_token, chat_id, "\n".join(lines))
+
+
 async def _handle_delete(chat_id: str, bot_token: str, admin_chat_id: str, args: str):
     if chat_id != admin_chat_id:
         await send_message(bot_token, chat_id, "⛔ This command is only available to the admin.")
@@ -430,6 +486,8 @@ async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
         await _handle_results(chat_id, bot_token)
     elif cmd == "/rank":
         await _handle_standings(chat_id, bot_token)
+    elif cmd == "/last":
+        await _handle_last(chat_id, bot_token)
     elif cmd == "/users":
         await _handle_users(chat_id, bot_token, admin_chat_id)
     elif cmd == "/delete":

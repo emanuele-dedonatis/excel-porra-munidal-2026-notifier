@@ -183,6 +183,19 @@ All default to `1 / 1 / 2`. Only set the ones that differ from your group's rule
 
 To update your predictions (e.g. after filling in knockout stage picks), just re-submit the form — it overwrites your previous entry.
 
+### Registering commands with BotFather
+
+To show the command list in Telegram, send `/setcommands` to [@BotFather](https://t.me/BotFather), select your bot, then paste:
+
+```
+chatid - Get your Telegram chat ID
+rank - Leaderboard with points and prediction stats
+predictions - Your full predictions list with kickoff times and results
+results - Finished matches with your outcomes and points earned
+status - Your points summary and prediction breakdown
+last - Last match result with everyone's picks
+```
+
 ### Bot commands
 
 | Command | Who | Description |
@@ -191,6 +204,7 @@ To update your predictions (e.g. after filling in knockout stage picks), just re
 | `/rank` | registered users | Group leaderboard ranked by total points, with ✅ ⚽ 🎯 ❌ breakdown per user |
 | `/predictions` | registered users | Full predictions list ordered by kickoff time (in your local timezone), with scores and points for finished matches |
 | `/results` | registered users | Finished matches only, with prediction outcome and points earned |
+| `/last` | registered users | Last finished match result with every user's prediction and points |
 | `/status` | registered users | Points summary with ✅ sign / ⚽ goal diff / 🎯 exact / ❌ wrong counts |
 | `/users` | admin only | All registered users with their total points |
 | `/delete <chat_id>` | admin only | Remove a user and all their match records from the database |
