@@ -34,26 +34,9 @@ class MatchPrediction:
     round_label: str
 
 
-def parse_name(file_bytes: bytes) -> str:
-    """Extract the participant's name from the Home sheet, cell C10."""
-    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+def _parse_utc_offset_from_ws(ws) -> float:
+    """Read UTC offset from Home sheet cell C8. Returns 0.0 on failure."""
     try:
-        ws = wb["Home"]
-        value = ws["C10"].value
-        return str(value).strip() if value else ""
-    except Exception:
-        return ""
-
-
-def parse_utc_offset(file_bytes: bytes) -> float:
-    """Read the UTC offset (in hours) from the Home sheet, cell C8.
-
-    Accepts numeric values (2, -3) or strings like '+2', 'UTC+2', '+05:30'.
-    Falls back to 0 (UTC) if unparseable.
-    """
-    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
-    try:
-        ws = wb["Home"]
         value = ws["C8"].value
         if value is None:
             return 0.0
@@ -69,16 +52,20 @@ def parse_utc_offset(file_bytes: bytes) -> float:
         return 0.0
 
 
-def parse_predictions(file_bytes: bytes, utc_offset_hours: int = 2) -> dict[int, MatchPrediction]:
-    """
-    Parse an Excel Porra Mundial file and return predictions keyed by match number.
-
-    Args:
-        file_bytes: Raw .xlsx content.
-        utc_offset_hours: UTC offset of the timezone shown in the Excel
-                          (default 2 = Spain UTC+2 summer time).
-    """
+def parse_excel(file_bytes: bytes) -> tuple[str, float, dict[int, "MatchPrediction"]]:
+    """Open the workbook once and return (name, utc_offset_hours, predictions)."""
     wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+
+    home_ws = wb["Home"]
+    name_value = home_ws["C10"].value
+    name = str(name_value).strip() if name_value else ""
+    utc_offset = _parse_utc_offset_from_ws(home_ws)
+
+    predictions = _parse_predictions_from_wb(wb, utc_offset)
+    return name, utc_offset, predictions
+
+
+def _parse_predictions_from_wb(wb, utc_offset_hours: float) -> dict[int, "MatchPrediction"]:
     ws = wb["WORLDCUP"]
     offset = timedelta(hours=utc_offset_hours)
 
@@ -124,6 +111,12 @@ def parse_predictions(file_bytes: bytes, utc_offset_hours: int = 2) -> dict[int,
         )
 
     return predictions
+
+
+def parse_predictions(file_bytes: bytes, utc_offset_hours: float = 2.0) -> dict[int, MatchPrediction]:
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    return _parse_predictions_from_wb(wb, utc_offset_hours)
+
 
 
 def to_json(predictions: dict[int, MatchPrediction]) -> dict:

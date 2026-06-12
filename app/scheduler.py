@@ -130,6 +130,8 @@ async def _process_finished_matches():
                         home_score=match.home_score,
                         away_score=match.away_score,
                         duration=match.duration,
+                        winner=match.winner,
+                        stage=match.stage,
                         prediction=pred["prediction"],
                         predicted_home_goals=pred.get("predicted_home_goals"),
                         predicted_away_goals=pred.get("predicted_away_goals"),
@@ -146,27 +148,57 @@ async def seed_past_matches(telegram_chat_id: str):
     """
     Mark all already-finished matches as notified for a newly registered user,
     so they don't receive a flood of notifications for past games.
-    Stores full match info so /status shows the correct history immediately.
+    Reads match results from the local DB to avoid hitting the API rate limit;
+    falls back to the API only if no finished matches are stored yet.
     """
     settings = get_settings()
-    if not settings.football_data_api_key:
-        return
-    try:
-        finished = await get_finished_matches(settings.football_data_api_key)
-    except Exception as e:
-        logger.error(f"Failed to seed past matches for {telegram_chat_id}: {e}")
-        return
-
     db: Session = SessionLocal()
     try:
         user = db.query(User).filter_by(telegram_chat_id=telegram_chat_id).first()
-        for match in finished:
+
+        # Collect one stored record per api_match_id (from any other user)
+        seen_ids: set[int] = set()
+        stored: list[NotifiedMatch] = []
+        for nm in db.query(NotifiedMatch).filter(NotifiedMatch.home_score.isnot(None)).all():
+            if nm.api_match_id not in seen_ids:
+                seen_ids.add(nm.api_match_id)
+                stored.append(nm)
+
+        if stored:
+            finished_matches = [
+                APIMatch(
+                    id=nm.api_match_id,
+                    home_team=nm.home_team,
+                    away_team=nm.away_team,
+                    kickoff_utc=datetime.now(timezone.utc),  # not used for scoring
+                    status="FINISHED",
+                    home_score=nm.home_score,
+                    away_score=nm.away_score,
+                    winner=nm.winner,
+                    duration=nm.duration,
+                    stage=nm.stage or "GROUP_STAGE",
+                    matchday=None,
+                )
+                for nm in stored
+            ]
+        else:
+            # No stored matches yet — fall back to API (first registration only)
+            if not settings.football_data_api_key:
+                return
+            try:
+                finished_matches = await get_finished_matches(settings.football_data_api_key)
+            except Exception as e:
+                logger.error(f"Failed to seed past matches for {telegram_chat_id}: {e}")
+                return
+
+        for match in finished_matches:
             exists = db.query(NotifiedMatch).filter_by(
                 telegram_chat_id=telegram_chat_id, api_match_id=match.id
             ).first()
             if exists:
                 continue
             pred = _find_prediction(user, match) if user else None
+            sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
             entry = NotifiedMatch(
                 telegram_chat_id=telegram_chat_id,
                 api_match_id=match.id,
@@ -175,16 +207,17 @@ async def seed_past_matches(telegram_chat_id: str):
                 home_score=match.home_score,
                 away_score=match.away_score,
                 duration=match.duration,
+                winner=match.winner,
+                stage=match.stage,
             )
             if pred:
+                cv = correct_value(pred["prediction"], match, pred.get("predicted_home_goals"), pred.get("predicted_away_goals"))
+                pts = calculate_points(pred["prediction"], match, pred.get("predicted_home_goals"), pred.get("predicted_away_goals"), sign_pts, goal_diff_pts, exact_pts)
                 entry.prediction = pred["prediction"]
                 entry.predicted_home_goals = pred.get("predicted_home_goals")
                 entry.predicted_away_goals = pred.get("predicted_away_goals")
-                entry.correct = correct_value(
-                    pred["prediction"], match,
-                    pred.get("predicted_home_goals"),
-                    pred.get("predicted_away_goals"),
-                )
+                entry.correct = cv
+                entry.points = pts
             db.add(entry)
         db.commit()
     finally:

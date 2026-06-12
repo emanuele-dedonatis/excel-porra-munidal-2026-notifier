@@ -30,6 +30,8 @@ class NotifiedMatch(Base):
     home_score = Column(Integer)
     away_score = Column(Integer)
     duration = Column(String)           # REGULAR | EXTRA_TIME | PENALTY_SHOOTOUT
+    winner = Column(String)             # HOME_TEAM | AWAY_TEAM | DRAW (from API)
+    stage = Column(String)              # GROUP_STAGE | LAST_32 | LAST_16 | …
     # User's prediction
     prediction = Column(String)
     predicted_home_goals = Column(Integer)

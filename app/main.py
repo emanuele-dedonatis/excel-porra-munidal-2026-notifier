@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from . import models  # ensure models are registered before create_all
 from .config import get_settings
 from .database import Base, SessionLocal, engine
-from .excel_parser import parse_name, parse_utc_offset, parse_predictions, to_json
+from .excel_parser import parse_excel, to_json
 from .notifier import send_message
 from .scheduler import seed_past_matches, start_scheduler, stop_scheduler
 from .telegram_bot import polling_loop, send_predictions_to_user, notify_admin_new_user
@@ -32,6 +32,8 @@ def _migrate_db():
             "home_score": "INTEGER",
             "away_score": "INTEGER",
             "duration": "VARCHAR",
+            "winner": "VARCHAR",
+            "stage": "VARCHAR",
             "prediction": "VARCHAR",
             "predicted_home_goals": "INTEGER",
             "predicted_away_goals": "INTEGER",
@@ -89,9 +91,8 @@ async def _process_registration(telegram_chat_id: str, file_bytes: bytes):
     settings = get_settings()
 
     try:
-        utc_offset = parse_utc_offset(file_bytes)
-        predictions = parse_predictions(file_bytes, utc_offset_hours=utc_offset)
-        name = parse_name(file_bytes) or "Unknown"
+        name, utc_offset, predictions = parse_excel(file_bytes)
+        name = name or "Unknown"
     except Exception as e:
         logger.error(f"Excel parse error for {telegram_chat_id}: {e}")
         if settings.telegram_bot_token:
