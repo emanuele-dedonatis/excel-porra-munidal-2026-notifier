@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import httpx
 from sqlalchemy import func as sa_func
@@ -147,7 +147,7 @@ def _build_nm_lookup(notified: list[NotifiedMatch]) -> dict:
     return lookup
 
 
-def _prediction_line(pred: dict, nm_lookup: dict) -> str:
+def _prediction_line(pred: dict, nm_lookup: dict, utc_offset: float = 0.0) -> str:
     home_es = pred.get("home_team", "?")
     away_es = pred.get("away_team", "?")
     prediction = pred.get("prediction") or "—"
@@ -160,7 +160,7 @@ def _prediction_line(pred: dict, nm_lookup: dict) -> str:
     kickoff_iso = pred.get("kickoff_utc")
     if kickoff_iso:
         try:
-            dt = datetime.fromisoformat(kickoff_iso)
+            dt = datetime.fromisoformat(kickoff_iso) + timedelta(hours=utc_offset)
             kickoff_str = dt.strftime("%d %b %H:%M")
         except (ValueError, TypeError):
             pass
@@ -219,6 +219,7 @@ def _build_predictions(user: User, notified: list[NotifiedMatch]) -> list[str]:
     nm_lookup = _build_nm_lookup(notified)
     preds = user.predictions or {}
     sorted_preds = sorted(((int(k), v) for k, v in preds.items()), key=lambda x: _kickoff_dt(x[1]))
+    utc_offset = user.utc_offset_hours or 0.0
 
     all_messages: list[str] = []
 
@@ -226,7 +227,7 @@ def _build_predictions(user: User, notified: list[NotifiedMatch]) -> list[str]:
     group_preds = [(n, p) for n, p in sorted_preds if n <= 72]
     lines = ["🏟 <b>Group Stage</b>"]
     for _match_num, pred in group_preds:
-        lines.append(_prediction_line(pred, nm_lookup))
+        lines.append(_prediction_line(pred, nm_lookup, utc_offset))
     all_messages.extend(_chunk_messages(lines))
 
     # --- Knockout rounds ---
@@ -236,7 +237,7 @@ def _build_predictions(user: User, notified: list[NotifiedMatch]) -> list[str]:
             continue
         lines = [title]
         for _match_num, pred in round_preds:
-            lines.append(_prediction_line(pred, nm_lookup))
+            lines.append(_prediction_line(pred, nm_lookup, utc_offset))
         all_messages.extend(_chunk_messages(lines))
 
     return all_messages
@@ -246,6 +247,7 @@ def _build_results(user: User, notified: list[NotifiedMatch]) -> list[str]:
     nm_lookup = _build_nm_lookup(notified)
     preds = user.predictions or {}
     sorted_preds = sorted(((int(k), v) for k, v in preds.items()), key=lambda x: _kickoff_dt(x[1]))
+    utc_offset = user.utc_offset_hours or 0.0
 
     def is_finished(pred: dict) -> bool:
         home_en = normalize(spanish_to_english(pred.get("home_team", "")))
@@ -259,7 +261,7 @@ def _build_results(user: User, notified: list[NotifiedMatch]) -> list[str]:
     if group_preds:
         lines = ["🏟 <b>Group Stage</b>"]
         for _match_num, pred in group_preds:
-            lines.append(_prediction_line(pred, nm_lookup))
+            lines.append(_prediction_line(pred, nm_lookup, utc_offset))
         all_messages.extend(_chunk_messages(lines))
 
     for title, rng in _KNOCKOUT_ROUNDS:
@@ -268,7 +270,7 @@ def _build_results(user: User, notified: list[NotifiedMatch]) -> list[str]:
             continue
         lines = [title]
         for _match_num, pred in round_preds:
-            lines.append(_prediction_line(pred, nm_lookup))
+            lines.append(_prediction_line(pred, nm_lookup, utc_offset))
         all_messages.extend(_chunk_messages(lines))
 
     if not all_messages:

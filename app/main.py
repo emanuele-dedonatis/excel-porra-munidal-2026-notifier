@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from . import models  # ensure models are registered before create_all
 from .config import get_settings
 from .database import Base, SessionLocal, engine
-from .excel_parser import parse_name, parse_predictions, to_json
+from .excel_parser import parse_name, parse_utc_offset, parse_predictions, to_json
 from .notifier import send_message
 from .scheduler import seed_past_matches, start_scheduler, stop_scheduler
 from .telegram_bot import polling_loop, send_predictions_to_user, notify_admin_new_user
@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 def _migrate_db():
     """Add any new columns to existing tables without dropping data."""
     new_cols = {
+        "users": {
+            "utc_offset_hours": "REAL",
+        },
         "notified_matches": {
             "home_team": "VARCHAR",
             "away_team": "VARCHAR",
@@ -86,7 +89,8 @@ async def _process_registration(telegram_chat_id: str, file_bytes: bytes):
     settings = get_settings()
 
     try:
-        predictions = parse_predictions(file_bytes)
+        utc_offset = parse_utc_offset(file_bytes)
+        predictions = parse_predictions(file_bytes, utc_offset_hours=utc_offset)
         name = parse_name(file_bytes) or "Unknown"
     except Exception as e:
         logger.error(f"Excel parse error for {telegram_chat_id}: {e}")
@@ -110,8 +114,9 @@ async def _process_registration(telegram_chat_id: str, file_bytes: bytes):
         if user:
             user.name = name
             user.predictions = predictions_json
+            user.utc_offset_hours = utc_offset
         else:
-            user = models.User(name=name, telegram_chat_id=telegram_chat_id, predictions=predictions_json)
+            user = models.User(name=name, telegram_chat_id=telegram_chat_id, predictions=predictions_json, utc_offset_hours=utc_offset)
             db.add(user)
         db.commit()
     finally:

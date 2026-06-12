@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, DateTime, JSON, UniqueConstraint
+from sqlalchemy import Column, Float, Integer, String, DateTime, JSON, UniqueConstraint
 from sqlalchemy.sql import func
 
 from .database import Base
@@ -13,6 +13,7 @@ class User(Base):
     # {str(match_number): {home_team, away_team, kickoff_utc, prediction,
     #                       predicted_home_goals, predicted_away_goals, round_label}}
     predictions = Column(JSON, nullable=False, default=dict)
+    utc_offset_hours = Column(Float, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

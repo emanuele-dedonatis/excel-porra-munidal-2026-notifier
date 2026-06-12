@@ -45,6 +45,30 @@ def parse_name(file_bytes: bytes) -> str:
         return ""
 
 
+def parse_utc_offset(file_bytes: bytes) -> float:
+    """Read the UTC offset (in hours) from the Home sheet, cell C8.
+
+    Accepts numeric values (2, -3) or strings like '+2', 'UTC+2', '+05:30'.
+    Falls back to 0 (UTC) if unparseable.
+    """
+    wb = openpyxl.load_workbook(BytesIO(file_bytes), data_only=True)
+    try:
+        ws = wb["Home"]
+        value = ws["C8"].value
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        s = str(value).strip().upper().replace("UTC", "").replace("GMT", "").replace(" ", "")
+        if ":" in s:
+            sign = -1 if s.startswith("-") else 1
+            parts = s.lstrip("+-").split(":")
+            return sign * (float(parts[0]) + float(parts[1]) / 60)
+        return float(s)
+    except Exception:
+        return 0.0
+
+
 def parse_predictions(file_bytes: bytes, utc_offset_hours: int = 2) -> dict[int, MatchPrediction]:
     """
     Parse an Excel Porra Mundial file and return predictions keyed by match number.
