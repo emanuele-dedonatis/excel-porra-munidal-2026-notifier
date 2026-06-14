@@ -215,6 +215,15 @@ def _kickoff_dt(pred: dict) -> datetime:
     return datetime.min.replace(tzinfo=timezone.utc)
 
 
+def _find_prediction_by_match(user: User, home_en: str, away_en: str) -> dict | None:
+    preds = user.predictions or {}
+    for pred in preds.values():
+        if (normalize(spanish_to_english(pred.get("home_team", ""))) == home_en
+                and normalize(spanish_to_english(pred.get("away_team", ""))) == away_en):
+            return pred
+    return None
+
+
 def _build_predictions(user: User, notified: list[NotifiedMatch]) -> list[str]:
     nm_lookup = _build_nm_lookup(notified)
     preds = user.predictions or {}
@@ -417,7 +426,22 @@ async def _handle_last(chat_id: str, bot_token: str):
     ref = records[0]
     score = f"{ref.home_score}–{ref.away_score}"
     suffix = {"EXTRA_TIME": " aet", "PENALTY_SHOOTOUT": " pens"}.get(ref.duration or "", "")
-    lines = [f"⚽ <b>Last match</b>\n<b>{ref.home_team} {score}{suffix} {ref.away_team}</b>\n"]
+
+    kickoff_str = "?"
+    if user:
+        match_home_en = normalize(spanish_to_english(ref.home_team or ""))
+        match_away_en = normalize(spanish_to_english(ref.away_team or ""))
+        match_pred = _find_prediction_by_match(user, match_home_en, match_away_en)
+        if match_pred is not None:
+            kickoff_iso = match_pred.get("kickoff_utc")
+            if kickoff_iso:
+                try:
+                    dt = datetime.fromisoformat(kickoff_iso) + timedelta(hours=user.utc_offset_hours or 0.0)
+                    kickoff_str = dt.strftime("%d %b %H:%M")
+                except (ValueError, TypeError):
+                    pass
+
+    lines = [f"⚽ <b>Last match</b>", f"{kickoff_str} <b>{ref.home_team} {score}{suffix} {ref.away_team}</b>\n"]
 
     by_chat: dict[str, NotifiedMatch] = {r.telegram_chat_id: r for r in records}
 
@@ -441,6 +465,84 @@ async def _handle_last(chat_id: str, bot_token: str):
         lines.append(f"{mark} <b>{u.name}</b>  › {pred_label}{pts_str}")
 
     await send_message(bot_token, chat_id, "\n".join(lines))
+
+
+async def _handle_next(chat_id: str, bot_token: str):
+    db: Session = SessionLocal()
+    try:
+        user = db.query(User).filter_by(telegram_chat_id=chat_id).first()
+        if not user:
+            await send_message(
+                bot_token, chat_id,
+                "⚠️ You're not registered yet.\nVisit the app to upload your Excel predictions."
+            )
+            return
+
+        notified = db.query(NotifiedMatch).filter_by(telegram_chat_id=chat_id).all()
+        nm_lookup = _build_nm_lookup(notified)
+        preds = user.predictions or {}
+        sorted_preds = sorted(((int(k), v) for k, v in preds.items()), key=lambda x: _kickoff_dt(x[1]))
+        utc_offset = user.utc_offset_hours or 0.0
+
+        next_pred = None
+        for _match_num, pred in sorted_preds:
+            home_en = normalize(spanish_to_english(pred.get("home_team", "")))
+            away_en = normalize(spanish_to_english(pred.get("away_team", "")))
+            nm = nm_lookup.get((home_en, away_en))
+            if nm is None or nm.home_score is None:
+                next_pred = pred
+                break
+
+        if not next_pred:
+            await send_message(bot_token, chat_id, "✅ All matches are finished — no next match available.")
+            return
+
+        kickoff_str = "?"
+        kickoff_iso = next_pred.get("kickoff_utc")
+        if kickoff_iso:
+            try:
+                dt = datetime.fromisoformat(kickoff_iso) + timedelta(hours=utc_offset)
+                kickoff_str = dt.strftime("%d %b %H:%M")
+            except (ValueError, TypeError):
+                pass
+
+        home_es = next_pred.get("home_team", "?")
+        away_es = next_pred.get("away_team", "?")
+        prediction = next_pred.get("prediction") or "—"
+        pred_hg = next_pred.get("predicted_home_goals")
+        pred_ag = next_pred.get("predicted_away_goals")
+        pred_label = _prediction_label(prediction, home_es, away_es, pred_hg, pred_ag)
+
+        users: list[User] = db.query(User).order_by(User.name).all()
+        match_home_en = normalize(spanish_to_english(home_es))
+        match_away_en = normalize(spanish_to_english(away_es))
+
+        lines = [
+            f"⏭️ <b>Next match</b>",
+            f"{kickoff_str} <b>{home_es} vs {away_es}</b>\n",
+        ]
+
+        for other in users:
+            other_match = _find_prediction_by_match(other, match_home_en, match_away_en)
+            if other_match is None:
+                lines.append(f"⚪ <b>{other.name}</b>  › no prediction")
+                continue
+
+            other_prediction = other_match.get("prediction") or "—"
+            other_pred_hg = other_match.get("predicted_home_goals")
+            other_pred_ag = other_match.get("predicted_away_goals")
+            other_label = _prediction_label(
+                other_prediction,
+                other_match.get("home_team", "?"),
+                other_match.get("away_team", "?"),
+                other_pred_hg,
+                other_pred_ag,
+            )
+            lines.append(f"⚪ <b>{other.name}</b>  › {other_label}")
+
+        await send_message(bot_token, chat_id, "\n".join(lines))
+    finally:
+        db.close()
 
 
 async def _handle_delete(chat_id: str, bot_token: str, admin_chat_id: str, args: str):
@@ -488,6 +590,8 @@ async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
         await _handle_standings(chat_id, bot_token)
     elif cmd == "/last":
         await _handle_last(chat_id, bot_token)
+    elif cmd == "/next":
+        await _handle_next(chat_id, bot_token)
     elif cmd == "/users":
         await _handle_users(chat_id, bot_token, admin_chat_id)
     elif cmd == "/delete":
