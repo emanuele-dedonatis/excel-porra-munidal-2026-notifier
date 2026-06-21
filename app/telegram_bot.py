@@ -405,11 +405,10 @@ async def _handle_last(chat_id: str, bot_token: str):
                                "⚠️ You're not registered yet.\nVisit the app to upload your Excel predictions.")
             return
 
-        # Find the highest api_match_id (IDs are sequential, so highest = most recent match)
         latest = (
             db.query(NotifiedMatch.api_match_id)
             .filter(NotifiedMatch.home_score.isnot(None))
-            .order_by(NotifiedMatch.api_match_id.desc())
+            .order_by(NotifiedMatch.notified_at.desc())
             .first()
         )
         if not latest:
