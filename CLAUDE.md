@@ -80,6 +80,7 @@ Scoring env vars follow the pattern `POINTS_{STAGE}_{TYPE}` where stage is `GROU
 | `/status` | registered | Points summary (✅ ⚽ 🎯 ❌ counts) |
 | `/users` | admin only | All registered users with total points |
 | `/delete <chat_id>` | admin only | Remove a user and all their match records |
+| `/recheck` | admin only | Re-fetch all match scores, send corrections to affected users, report summary |
 
 ---
 

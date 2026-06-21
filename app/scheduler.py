@@ -155,6 +155,50 @@ async def _process_finished_matches():
         db.close()
 
 
+async def _correct_match_scores(db: Session, match: APIMatch, settings) -> int:
+    """Send correction messages to users whose stored score for match differs from the API score.
+    Updates NotifiedMatch records in-place. Caller must commit. Returns count of corrected users."""
+    notified_rows = db.query(NotifiedMatch).filter_by(api_match_id=match.id).all()
+    corrected = 0
+    for nm in notified_rows:
+        if nm.home_score == match.home_score and nm.away_score == match.away_score:
+            continue
+        if nm.prediction is None:
+            continue
+        old_home = nm.home_score or 0
+        old_away = nm.away_score or 0
+        sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
+        new_pts = calculate_points(
+            nm.prediction, match,
+            nm.predicted_home_goals, nm.predicted_away_goals,
+            sign_pts, goal_diff_pts, exact_pts,
+        )
+        new_cv = correct_value(nm.prediction, match, nm.predicted_home_goals, nm.predicted_away_goals)
+        current_total = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
+            telegram_chat_id=nm.telegram_chat_id,
+        ).scalar() or 0
+        updated_total = current_total - (nm.points or 0) + new_pts
+        text = build_correction_message(
+            match=match,
+            old_home=old_home,
+            old_away=old_away,
+            prediction=nm.prediction,
+            predicted_home_goals=nm.predicted_home_goals,
+            predicted_away_goals=nm.predicted_away_goals,
+            old_points=nm.points or 0,
+            new_points=new_pts,
+            total_points=updated_total,
+        )
+        sent = await send_message(settings.telegram_bot_token, nm.telegram_chat_id, text)
+        if sent:
+            nm.home_score = match.home_score
+            nm.away_score = match.away_score
+            nm.correct = new_cv
+            nm.points = new_pts
+            corrected += 1
+    return corrected
+
+
 async def _recheck_scores():
     settings = get_settings()
     if not settings.football_data_api_key or not settings.telegram_bot_token:
@@ -193,51 +237,12 @@ async def _recheck_scores():
                     continue
                 match.home_score, match.away_score = espn
 
-            if match.home_score == recheck.notified_home and match.away_score == recheck.notified_away:
-                recheck.done = True
-                continue
-
-            logger.info(
-                f"Score correction for match {match.id} ({match.home_team} vs {match.away_team}): "
-                f"{recheck.notified_home}–{recheck.notified_away} → {match.home_score}–{match.away_score}"
-            )
-
-            notified_rows = db.query(NotifiedMatch).filter_by(api_match_id=recheck.api_match_id).all()
-            for nm in notified_rows:
-                if nm.prediction is None:
-                    continue
-
-                sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
-                new_pts = calculate_points(
-                    nm.prediction, match,
-                    nm.predicted_home_goals, nm.predicted_away_goals,
-                    sign_pts, goal_diff_pts, exact_pts,
+            corrected = await _correct_match_scores(db, match, settings)
+            if corrected:
+                logger.info(
+                    f"Score correction for match {match.id} ({match.home_team} vs {match.away_team}): "
+                    f"corrected {corrected} users"
                 )
-                new_cv = correct_value(nm.prediction, match, nm.predicted_home_goals, nm.predicted_away_goals)
-
-                current_total = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
-                    telegram_chat_id=nm.telegram_chat_id,
-                ).scalar() or 0
-                updated_total = current_total - (nm.points or 0) + new_pts
-
-                text = build_correction_message(
-                    match=match,
-                    old_home=recheck.notified_home,
-                    old_away=recheck.notified_away,
-                    prediction=nm.prediction,
-                    predicted_home_goals=nm.predicted_home_goals,
-                    predicted_away_goals=nm.predicted_away_goals,
-                    old_points=nm.points or 0,
-                    new_points=new_pts,
-                    total_points=updated_total,
-                )
-                sent = await send_message(settings.telegram_bot_token, nm.telegram_chat_id, text)
-                if sent:
-                    nm.home_score = match.home_score
-                    nm.away_score = match.away_score
-                    nm.correct = new_cv
-                    nm.points = new_pts
-
             recheck.done = True
 
         db.commit()
@@ -245,9 +250,90 @@ async def _recheck_scores():
         db.close()
 
 
+async def force_recheck_all() -> tuple[int, list[tuple[str, str, str, int]]]:
+    """Re-check scores for all matches that have NotifiedMatch records.
+    Sends correction messages to affected users and updates their records.
+    Returns (matches_checked, corrections) where each correction is
+    (match_label, old_score, new_score, users_corrected)."""
+    settings = get_settings()
+    db: Session = SessionLocal()
+    try:
+        try:
+            finished = await get_finished_matches(settings.football_data_api_key)
+        except Exception as e:
+            logger.error(f"Failed to fetch matches for force recheck: {e}")
+            return 0, []
+
+        finished_by_id = {m.id: m for m in finished}
+        stored_ids = {row[0] for row in db.query(NotifiedMatch.api_match_id).distinct().all()}
+
+        matches_checked = 0
+        corrections: list[tuple[str, str, str, int]] = []
+
+        for api_match_id in stored_ids:
+            match = finished_by_id.get(api_match_id)
+            if match is None:
+                continue
+
+            if match.home_score is None or match.away_score is None:
+                espn = await fetch_score(match.home_team, match.away_team, match.kickoff_utc)
+                if espn is None:
+                    continue
+                match.home_score, match.away_score = espn
+
+            matches_checked += 1
+
+            stale = db.query(NotifiedMatch).filter(
+                NotifiedMatch.api_match_id == api_match_id,
+                (NotifiedMatch.home_score != match.home_score) | (NotifiedMatch.away_score != match.away_score),
+            ).first()
+
+            if stale:
+                old_score = f"{stale.home_score}–{stale.away_score}"
+                new_score = f"{match.home_score}–{match.away_score}"
+                corrected = await _correct_match_scores(db, match, settings)
+                if corrected:
+                    corrections.append((
+                        f"{match.home_team} vs {match.away_team}",
+                        old_score, new_score, corrected,
+                    ))
+                    logger.info(
+                        f"Force recheck: corrected {corrected} users for "
+                        f"{match.home_team} vs {match.away_team} ({old_score} → {new_score})"
+                    )
+
+            recheck = db.get(MatchRecheck, api_match_id)
+            if recheck and not recheck.done:
+                recheck.done = True
+
+        db.commit()
+        return matches_checked, corrections
+    finally:
+        db.close()
+
+
 async def _check_matches():
     await _recheck_scores()
     await _process_finished_matches()
+
+
+async def _daily_recheck():
+    settings = get_settings()
+    if not settings.football_data_api_key or not settings.telegram_bot_token:
+        return
+
+    matches_checked, corrections = await force_recheck_all()
+
+    if not corrections:
+        logger.info(f"Daily recheck: {matches_checked} matches checked, all scores correct")
+        return
+
+    logger.info(f"Daily recheck: {len(corrections)} correction(s) found across {matches_checked} matches")
+    if settings.admin_telegram_chat_id:
+        lines = [f"🔄 Daily recheck — {matches_checked} match(es) checked\n"]
+        for match_label, old_score, new_score, user_count in corrections:
+            lines.append(f"✏️ <b>{match_label}</b>: {old_score} → {new_score}  ({user_count} user(s) corrected)")
+        await send_message(settings.telegram_bot_token, settings.admin_telegram_chat_id, "\n".join(lines))
 
 
 async def seed_past_matches(telegram_chat_id: str):
@@ -340,8 +426,16 @@ def start_scheduler():
         replace_existing=True,
         next_run_time=datetime.now(timezone.utc),
     )
+    scheduler.add_job(
+        _daily_recheck,
+        "cron",
+        hour=6,
+        minute=0,
+        id="daily_recheck",
+        replace_existing=True,
+    )
     scheduler.start()
-    logger.info(f"Scheduler started — polling every {settings.poll_interval_seconds}s")
+    logger.info(f"Scheduler started — polling every {settings.poll_interval_seconds}s, daily recheck at 06:00 UTC")
 
 
 def stop_scheduler():

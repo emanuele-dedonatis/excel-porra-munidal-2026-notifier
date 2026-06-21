@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from .database import SessionLocal
 from .models import NotifiedMatch, User
 from .notifier import send_message
+from .scheduler import force_recheck_all
 from .team_names import names_match, normalize, spanish_to_english
 
 logger = logging.getLogger(__name__)
@@ -544,6 +545,27 @@ async def _handle_next(chat_id: str, bot_token: str):
         db.close()
 
 
+async def _handle_recheck(chat_id: str, bot_token: str, admin_chat_id: str):
+    if chat_id != admin_chat_id:
+        await send_message(bot_token, chat_id, "⛔ This command is only available to the admin.")
+        return
+
+    await send_message(bot_token, chat_id, "⏳ Rechecking all match scores against the API…")
+    matches_checked, corrections = await force_recheck_all()
+
+    if not corrections:
+        await send_message(
+            bot_token, chat_id,
+            f"✅ Recheck complete — {matches_checked} match(es) checked, all scores are correct."
+        )
+        return
+
+    lines = [f"🔄 Recheck complete — {matches_checked} match(es) checked\n"]
+    for match_label, old_score, new_score, user_count in corrections:
+        lines.append(f"✏️ <b>{match_label}</b>: {old_score} → {new_score}  ({user_count} user(s) corrected)")
+    await send_message(bot_token, chat_id, "\n".join(lines))
+
+
 async def _handle_delete(chat_id: str, bot_token: str, admin_chat_id: str, args: str):
     if chat_id != admin_chat_id:
         await send_message(bot_token, chat_id, "⛔ This command is only available to the admin.")
@@ -595,6 +617,8 @@ async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
         await _handle_users(chat_id, bot_token, admin_chat_id)
     elif cmd == "/delete":
         await _handle_delete(chat_id, bot_token, admin_chat_id, args)
+    elif cmd == "/recheck":
+        await _handle_recheck(chat_id, bot_token, admin_chat_id)
     elif cmd == "/chatid":
         await send_message(bot_token, chat_id, f"Your Telegram chat ID is: <code>{chat_id}</code>")
 
