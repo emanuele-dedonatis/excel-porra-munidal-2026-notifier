@@ -126,6 +126,55 @@ def build_message(
     )
 
 
+def build_correction_message(
+    match: APIMatch,
+    old_home: int,
+    old_away: int,
+    prediction: str,
+    predicted_home_goals: Optional[int],
+    predicted_away_goals: Optional[int],
+    old_points: int,
+    new_points: int,
+    total_points: int,
+) -> str:
+    cv = correct_value(prediction, match, predicted_home_goals, predicted_away_goals)
+    correct = cv >= 1
+    exact = cv == 2
+
+    result_line = f"{match.home_team} {match.home_score}–{match.away_score} {match.away_team}"
+    if match.duration and match.duration != "REGULAR":
+        duration_note = {"EXTRA_TIME": " (a.e.t.)", "PENALTY_SHOOTOUT": " (pens.)"}.get(match.duration, "")
+        result_line += duration_note
+
+    if prediction == "home":
+        pred_text = f"{match.home_team} win"
+    elif prediction == "away":
+        pred_text = f"{match.away_team} win"
+    elif prediction == "draw":
+        pred_text = "Draw"
+    else:
+        pred_text = f"{prediction} wins"
+
+    if predicted_home_goals is not None and predicted_away_goals is not None:
+        pred_text += f" ({predicted_home_goals}–{predicted_away_goals})"
+
+    if exact:
+        verdict = f"Exact score! 🎯  <b>+{new_points} pts</b>"
+    elif correct:
+        verdict = f"Correct result! ✅  <b>+{new_points} pts</b>"
+    else:
+        verdict = f"Wrong prediction ❌  +0 pts"
+
+    pts_change = f"{old_points} → {new_points}" if old_points != new_points else str(new_points)
+
+    return (
+        f"⚠️ <b>Score correction</b>\n"
+        f"<b>{result_line}</b> (was {old_home}–{old_away})\n\n"
+        f"Your prediction: {pred_text}\n"
+        f"{verdict}  (pts: {pts_change}, total: {total_points} pts)"
+    )
+
+
 async def send_message(bot_token: str, chat_id: str, text: str) -> bool:
     url = _TELEGRAM_URL.format(token=bot_token)
     async with httpx.AsyncClient(timeout=10.0) as client:

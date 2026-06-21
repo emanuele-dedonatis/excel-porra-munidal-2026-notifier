@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Float, Integer, String, DateTime, JSON, UniqueConstraint
+from sqlalchemy import Boolean, Column, Float, Integer, String, DateTime, JSON, UniqueConstraint
 from sqlalchemy.sql import func
 
 from .database import Base
@@ -42,3 +42,13 @@ class NotifiedMatch(Base):
     notified_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (UniqueConstraint("telegram_chat_id", "api_match_id"),)
+
+
+class MatchRecheck(Base):
+    __tablename__ = "match_recheck"
+
+    api_match_id  = Column(Integer, primary_key=True)
+    recheck_after = Column(DateTime, nullable=False)
+    notified_home = Column(Integer, nullable=False)
+    notified_away = Column(Integer, nullable=False)
+    done          = Column(Boolean, default=False, nullable=False)

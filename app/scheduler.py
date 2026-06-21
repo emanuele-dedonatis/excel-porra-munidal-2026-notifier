@@ -10,8 +10,8 @@ from .config import get_settings
 from .database import SessionLocal
 from .espn_api import fetch_score
 from .football_api import APIMatch, get_finished_matches
-from .models import NotifiedMatch, User
-from .notifier import build_message, calculate_points, correct_value, send_message
+from .models import MatchRecheck, NotifiedMatch, User
+from .notifier import build_correction_message, build_message, calculate_points, correct_value, send_message
 from .team_names import names_match
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,7 @@ async def _process_finished_matches():
     db: Session = SessionLocal()
     try:
         users: list[User] = db.query(User).all()
+        recheck_scheduled: set[int] = set()
 
         for match in finished:
             if match.home_score is None or match.away_score is None:
@@ -138,10 +139,115 @@ async def _process_finished_matches():
                         correct=cv,
                         points=pts,
                     ))
+                    if match.id not in recheck_scheduled and db.get(MatchRecheck, match.id) is None:
+                        delay = timedelta(seconds=settings.score_recheck_delay_seconds)
+                        db.add(MatchRecheck(
+                            api_match_id=match.id,
+                            recheck_after=(datetime.now(timezone.utc) + delay).replace(tzinfo=None),
+                            notified_home=match.home_score,
+                            notified_away=match.away_score,
+                            done=False,
+                        ))
+                        recheck_scheduled.add(match.id)
                     db.commit()
                     logger.info(f"Notified {user.name} for match {match.home_team} vs {match.away_team}")
     finally:
         db.close()
+
+
+async def _recheck_scores():
+    settings = get_settings()
+    if not settings.football_data_api_key or not settings.telegram_bot_token:
+        return
+
+    db: Session = SessionLocal()
+    try:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        pending = db.query(MatchRecheck).filter(
+            MatchRecheck.recheck_after <= now,
+            MatchRecheck.done == False,  # noqa: E712
+        ).all()
+
+        if not pending:
+            return
+
+        try:
+            finished = await get_finished_matches(settings.football_data_api_key)
+        except Exception as e:
+            logger.error(f"Failed to fetch matches for score recheck: {e}")
+            return
+
+        finished_by_id = {m.id: m for m in finished}
+
+        for recheck in pending:
+            match = finished_by_id.get(recheck.api_match_id)
+            if match is None:
+                logger.warning(f"Match {recheck.api_match_id} not found in FINISHED list during recheck")
+                recheck.done = True
+                continue
+
+            if match.home_score is None or match.away_score is None:
+                espn = await fetch_score(match.home_team, match.away_team, match.kickoff_utc)
+                if espn is None:
+                    recheck.done = True
+                    continue
+                match.home_score, match.away_score = espn
+
+            if match.home_score == recheck.notified_home and match.away_score == recheck.notified_away:
+                recheck.done = True
+                continue
+
+            logger.info(
+                f"Score correction for match {match.id} ({match.home_team} vs {match.away_team}): "
+                f"{recheck.notified_home}–{recheck.notified_away} → {match.home_score}–{match.away_score}"
+            )
+
+            notified_rows = db.query(NotifiedMatch).filter_by(api_match_id=recheck.api_match_id).all()
+            for nm in notified_rows:
+                if nm.prediction is None:
+                    continue
+
+                sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
+                new_pts = calculate_points(
+                    nm.prediction, match,
+                    nm.predicted_home_goals, nm.predicted_away_goals,
+                    sign_pts, goal_diff_pts, exact_pts,
+                )
+                new_cv = correct_value(nm.prediction, match, nm.predicted_home_goals, nm.predicted_away_goals)
+
+                current_total = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
+                    telegram_chat_id=nm.telegram_chat_id,
+                ).scalar() or 0
+                updated_total = current_total - (nm.points or 0) + new_pts
+
+                text = build_correction_message(
+                    match=match,
+                    old_home=recheck.notified_home,
+                    old_away=recheck.notified_away,
+                    prediction=nm.prediction,
+                    predicted_home_goals=nm.predicted_home_goals,
+                    predicted_away_goals=nm.predicted_away_goals,
+                    old_points=nm.points or 0,
+                    new_points=new_pts,
+                    total_points=updated_total,
+                )
+                sent = await send_message(settings.telegram_bot_token, nm.telegram_chat_id, text)
+                if sent:
+                    nm.home_score = match.home_score
+                    nm.away_score = match.away_score
+                    nm.correct = new_cv
+                    nm.points = new_pts
+
+            recheck.done = True
+
+        db.commit()
+    finally:
+        db.close()
+
+
+async def _check_matches():
+    await _recheck_scores()
+    await _process_finished_matches()
 
 
 async def seed_past_matches(telegram_chat_id: str):
@@ -227,7 +333,7 @@ async def seed_past_matches(telegram_chat_id: str):
 def start_scheduler():
     settings = get_settings()
     scheduler.add_job(
-        _process_finished_matches,
+        _check_matches,
         "interval",
         seconds=settings.poll_interval_seconds,
         id="check_matches",

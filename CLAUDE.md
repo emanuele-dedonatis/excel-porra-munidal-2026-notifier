@@ -56,6 +56,7 @@ app/
 | `ADMIN_TELEGRAM_CHAT_ID` | Admin's Telegram chat ID | optional |
 | `DATABASE_URL` | SQLite path | `sqlite:///./data/app.db` |
 | `POLL_INTERVAL_SECONDS` | Match-check frequency | `300` |
+| `SCORE_RECHECK_DELAY_SECONDS` | Seconds after notification to re-check score for corrections | `600` |
 | `DEBUG` | FastAPI debug mode | `false` |
 | `APP_PORT` | Host port for web container | `8000` |
 | `HTTP_PORT` | Nginx HTTP port (https profile) | `80` |

@@ -117,6 +117,7 @@ Without the `https` profile, only the app is started (plain HTTP on port `8000`,
 | `ADMIN_TELEGRAM_CHAT_ID` | Admin's Telegram chat ID (see below) | optional |
 | `DATABASE_URL` | SQLite path | `sqlite:///./data/app.db` |
 | `POLL_INTERVAL_SECONDS` | How often to check for results | `300` (5 min) |
+| `SCORE_RECHECK_DELAY_SECONDS` | Seconds after notification to re-check the score for corrections | `600` (10 min) |
 | `DEBUG` | Enable FastAPI debug mode | `false` |
 | `APP_PORT` | Host port the web container is exposed on | `8000` |
 | `HTTP_PORT` | Nginx HTTP port (https profile only) | `80` |
