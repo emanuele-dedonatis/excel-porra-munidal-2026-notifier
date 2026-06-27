@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     points_final_goal_diff: int = 1
     points_final_exact: int = 2
 
+    points_group_rank_position: int = 1   # points per correct group finishing position (1st/2nd/3rd/4th)
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     def stage_points(self, stage: str) -> tuple[int, int, int]:

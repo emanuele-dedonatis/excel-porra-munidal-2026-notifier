@@ -139,6 +139,8 @@ To find your chat ID, start the bot and send it `/chatid`.
 
 ### Scoring
 
+#### Match results
+
 Points are awarded per match and are configurable per tournament stage. The default scoring matches the standard Porra Mundial rules:
 
 | Points for… | Default |
@@ -163,6 +165,18 @@ POINTS_FINAL_SIGN / POINTS_FINAL_GOAL_DIFF / POINTS_FINAL_EXACT
 ```
 
 All default to `1 / 1 / 2`. Only set the ones that differ from your group's rules.
+
+#### Group stage rankings
+
+Once all three matchdays of a group finish, the bot derives each user's **predicted group standings** by simulating the group table from their stored match predictions (predicted win/draw/loss → 3/1/0 pts, then sorted by goal difference and goals scored). It compares this with the actual API standings and awards 1 point per correctly predicted finishing position (1st / 2nd / 3rd / 4th).
+
+Users receive one Telegram notification per group as it completes, and group ranking points are included in all totals shown by `/rank`, `/status`, and `/users`.
+
+The per-position point value is configurable:
+
+```
+POINTS_GROUP_RANK_POSITION=1   # default: 1 pt per correct position
+```
 
 ---
 

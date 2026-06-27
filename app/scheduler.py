@@ -9,8 +9,13 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import SessionLocal
 from .espn_api import fetch_score
-from .football_api import APIMatch, get_finished_matches
-from .models import MatchRecheck, NotifiedMatch, User
+from .football_api import APIMatch, get_finished_matches, get_standings
+from .group_rankings import (
+    build_group_ranking_message,
+    compute_ranking_points,
+    simulate_predicted_standings,
+)
+from .models import GroupRankingAward, MatchRecheck, NotifiedMatch, User
 from .notifier import build_correction_message, build_message, calculate_points, correct_value, send_message
 from .team_names import names_match
 
@@ -312,9 +317,83 @@ async def force_recheck_all() -> tuple[int, list[tuple[str, str, str, int]]]:
         db.close()
 
 
+async def _check_group_rankings():
+    """Award group position points once each group's 3 matchdays are complete."""
+    settings = get_settings()
+    if not settings.football_data_api_key or not settings.telegram_bot_token:
+        return
+
+    try:
+        standings = await get_standings(settings.football_data_api_key)
+    except Exception as e:
+        logger.error(f"Failed to fetch standings for group ranking check: {e}")
+        return
+
+    complete_groups = [g for g in standings if g["played"] >= 3]
+    if not complete_groups:
+        return
+
+    db: Session = SessionLocal()
+    try:
+        users: list[User] = db.query(User).all()
+        for group in complete_groups:
+            group_name = group["group"]
+            actual_pos = group["teams"]  # ordered 1→4 by API
+
+            for user in users:
+                already = db.query(GroupRankingAward).filter_by(
+                    telegram_chat_id=user.telegram_chat_id,
+                    group_name=group_name,
+                ).first()
+                if already:
+                    continue
+
+                if not user.predictions:
+                    continue
+
+                predicted_pos = simulate_predicted_standings(user.predictions, actual_pos)
+                if predicted_pos is None:
+                    logger.warning(
+                        f"Could not simulate group standings for {user.name} / {group_name} "
+                        f"(fewer than 6 predictions found)"
+                    )
+                    continue
+
+                pts = compute_ranking_points(
+                    predicted_pos, actual_pos, settings.points_group_rank_position
+                )
+
+                match_pts = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
+                    telegram_chat_id=user.telegram_chat_id,
+                ).scalar() or 0
+                ranking_pts = db.query(sa_func.sum(GroupRankingAward.points)).filter_by(
+                    telegram_chat_id=user.telegram_chat_id,
+                ).scalar() or 0
+                total_pts = match_pts + ranking_pts + pts
+
+                text = build_group_ranking_message(group_name, predicted_pos, actual_pos, pts, total_pts)
+                sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
+                if sent:
+                    db.add(GroupRankingAward(
+                        telegram_chat_id=user.telegram_chat_id,
+                        group_name=group_name,
+                        pred_pos=predicted_pos,
+                        actual_pos=actual_pos,
+                        points=pts,
+                    ))
+                    db.commit()
+                    logger.info(
+                        f"Group ranking awarded: {user.name} / {group_name} → {pts} pts "
+                        f"(predicted {predicted_pos}, actual {actual_pos})"
+                    )
+    finally:
+        db.close()
+
+
 async def _check_matches():
     await _recheck_scores()
     await _process_finished_matches()
+    await _check_group_rankings()
 
 
 async def _daily_recheck():

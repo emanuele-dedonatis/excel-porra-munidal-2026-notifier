@@ -7,7 +7,7 @@ from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
 from .database import SessionLocal
-from .models import NotifiedMatch, User
+from .models import GroupRankingAward, NotifiedMatch, User
 from .notifier import send_message
 from .scheduler import force_recheck_all
 from .team_names import names_match, normalize, spanish_to_english
@@ -60,7 +60,13 @@ def _stats_line(total: int, sign_only: int, goal_diff: int, exact: int) -> str:
     return f"✅ {sign_only + goal_diff + exact}  ⚽ {goal_diff + exact}  🎯 {exact}  ❌ {wrong}"
 
 
-def _build_status(user: User, notified: list[NotifiedMatch]) -> str:
+def _group_ranking_pts(db: Session, telegram_chat_id: str) -> int:
+    return db.query(sa_func.sum(GroupRankingAward.points)).filter_by(
+        telegram_chat_id=telegram_chat_id,
+    ).scalar() or 0
+
+
+def _build_status(user: User, notified: list[NotifiedMatch], group_rank_pts: int = 0) -> str:
     finished = [n for n in notified if n.home_team and n.away_team]
 
     lines = [f"📊 <b>WC 2026 — {user.name}</b>"]
@@ -70,9 +76,10 @@ def _build_status(user: User, notified: list[NotifiedMatch]) -> str:
         return "\n".join(lines)
 
     total_f = len(finished)
-    _, sign_only, goal_diff, exact, total_pts = _stats(finished)
+    _, sign_only, goal_diff, exact, match_pts = _stats(finished)
+    total_pts = match_pts + group_rank_pts
     lines.append(_stats_line(total_f, sign_only, goal_diff, exact))
-    lines.append(f"⭐ Total points: <b>{total_pts} pts</b>")
+    lines.append(f"⭐ Total points: <b>{total_pts} pts</b>  (matches: {match_pts}, group rankings: {group_rank_pts})")
     lines.append("")
 
     for n in sorted(finished, key=lambda x: x.notified_at or datetime.min.replace(tzinfo=timezone.utc)):
@@ -113,7 +120,8 @@ async def _handle_status(chat_id: str, bot_token: str):
             return
 
         notified = db.query(NotifiedMatch).filter_by(telegram_chat_id=chat_id).all()
-        text = _build_status(user, notified)
+        grp_pts = _group_ranking_pts(db, chat_id)
+        text = _build_status(user, notified, grp_pts)
     finally:
         db.close()
 
@@ -343,12 +351,19 @@ async def _handle_users(chat_id: str, bot_token: str, admin_chat_id: str):
     db: Session = SessionLocal()
     try:
         users: list[User] = db.query(User).order_by(User.created_at).all()
-        user_pts = {
-            chat_id_: pts or 0
-            for chat_id_, pts in db.query(
+        match_pts_by_user = {
+            cid: pts or 0
+            for cid, pts in db.query(
                 NotifiedMatch.telegram_chat_id,
                 sa_func.sum(NotifiedMatch.points),
             ).group_by(NotifiedMatch.telegram_chat_id).all()
+        }
+        grp_pts_by_user = {
+            cid: pts or 0
+            for cid, pts in db.query(
+                GroupRankingAward.telegram_chat_id,
+                sa_func.sum(GroupRankingAward.points),
+            ).group_by(GroupRankingAward.telegram_chat_id).all()
         }
     finally:
         db.close()
@@ -359,7 +374,7 @@ async def _handle_users(chat_id: str, bot_token: str, admin_chat_id: str):
 
     lines = [f"👥 <b>Registered users ({len(users)})</b>"]
     for u in users:
-        pts = user_pts.get(u.telegram_chat_id, 0)
+        pts = match_pts_by_user.get(u.telegram_chat_id, 0) + grp_pts_by_user.get(u.telegram_chat_id, 0)
         lines.append(f"• {u.name}  <code>{u.telegram_chat_id}</code>  ⭐ {pts} pts")
 
     await send_message(bot_token, chat_id, "\n".join(lines))
@@ -370,6 +385,13 @@ async def _handle_standings(chat_id: str, bot_token: str):
     try:
         users: list[User] = db.query(User).all()
         all_notified = db.query(NotifiedMatch).filter(NotifiedMatch.home_team.isnot(None)).all()
+        grp_pts_by_user: dict[str, int] = {
+            cid: (pts or 0)
+            for cid, pts in db.query(
+                GroupRankingAward.telegram_chat_id,
+                sa_func.sum(GroupRankingAward.points),
+            ).group_by(GroupRankingAward.telegram_chat_id).all()
+        }
     finally:
         db.close()
 
@@ -382,17 +404,19 @@ async def _handle_standings(chat_id: str, bot_token: str):
         by_user.setdefault(nm.telegram_chat_id, []).append(nm)
 
     def sort_key(u: User):
-        _, _, _, _, pts = _stats(by_user.get(u.telegram_chat_id, []))
-        return pts
+        _, _, _, _, match_pts = _stats(by_user.get(u.telegram_chat_id, []))
+        return match_pts + grp_pts_by_user.get(u.telegram_chat_id, 0)
 
     ranked = sorted(users, key=sort_key, reverse=True)
 
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     lines = ["🏆 <b>Standings</b>\n"]
     for i, u in enumerate(ranked, 1):
-        total, sign_only, goal_diff, exact, pts = _stats(by_user.get(u.telegram_chat_id, []))
+        total, sign_only, goal_diff, exact, match_pts = _stats(by_user.get(u.telegram_chat_id, []))
+        grp_pts = grp_pts_by_user.get(u.telegram_chat_id, 0)
+        total_pts = match_pts + grp_pts
         prefix = medals.get(i, f"{i}.")
-        lines.append(f"{prefix} <b>{u.name}</b>  ⭐ {pts} pts\n    {_stats_line(total, sign_only, goal_diff, exact)}")
+        lines.append(f"{prefix} <b>{u.name}</b>  ⭐ {total_pts} pts\n    {_stats_line(total, sign_only, goal_diff, exact)}")
 
     await send_message(bot_token, chat_id, "\n".join(lines))
 

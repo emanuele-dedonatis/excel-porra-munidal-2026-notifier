@@ -65,6 +65,8 @@ app/
 
 Scoring env vars follow the pattern `POINTS_{STAGE}_{TYPE}` where stage is `GROUP/R32/R16/QF/SF/3RD/FINAL` and type is `SIGN/GOAL_DIFF/EXACT`. All default to `1/1/2`.
 
+`POINTS_GROUP_RANK_POSITION` — points per correctly predicted group finishing position (1st/2nd/3rd/4th). Default `1`.
+
 ---
 
 ## Bot commands
