@@ -9,9 +9,10 @@ from sqlalchemy.orm import Session
 from .config import get_settings
 from .database import SessionLocal
 from .espn_api import fetch_score
-from .football_api import APIMatch, get_finished_matches, get_standings
+from .football_api import APIMatch, get_finished_matches, get_matches, get_standings
 from .group_rankings import (
     build_group_ranking_message,
+    compute_r32_advancement_points,
     compute_ranking_points,
     simulate_predicted_standings,
 )
@@ -24,24 +25,43 @@ scheduler = AsyncIOScheduler()
 
 _KICKOFF_TOLERANCE = timedelta(hours=1)
 
+# Maps API stage names to the round_label values used in the Excel template
+_STAGE_TO_ROUND_LABELS: dict[str, set[str]] = {
+    "GROUP_STAGE":    {"J1", "J2", "J3"},
+    "LAST_32":        {"1/32"},
+    "LAST_16":        {"1/16"},
+    "QUARTER_FINALS": {"1/4"},
+    "SEMI_FINALS":    {"1/2"},
+    "THIRD_PLACE":    {"3/4"},
+    "FINAL":          {"Final"},
+}
+
 
 def _find_prediction(user: User, match: APIMatch) -> Optional[dict]:
     """
     Find the user's prediction for an API match.
-    Primary strategy: team name matching (Spanish → English via mapping).
-    Fallback: closest kickoff time within tolerance.
+    Primary: team name match in either home/away ordering, filtered by round label.
+    Fallback: closest kickoff time within tolerance (group stage only).
     """
     if not user.predictions:
         return None
 
-    # Primary: exact team name match
+    valid_labels = _STAGE_TO_ROUND_LABELS.get(match.stage, set())
+
+    # Primary: team name match (try both home/away orderings)
     for pred in user.predictions.values():
         home_es = pred.get("home_team", "")
         away_es = pred.get("away_team", "")
-        if names_match(home_es, match.home_team) and names_match(away_es, match.away_team):
-            return pred
+        forward  = names_match(home_es, match.home_team) and names_match(away_es, match.away_team)
+        backward = names_match(home_es, match.away_team) and names_match(away_es, match.home_team)
+        if forward or backward:
+            if not valid_labels or str(pred.get("round_label", "")) in valid_labels:
+                return pred
 
-    # Fallback: closest kickoff within tolerance (handles unmapped team names)
+    # Fallback: closest kickoff within tolerance (group stage only — knockout must match by team names)
+    if match.stage != "GROUP_STAGE":
+        return None
+
     best_pred = None
     best_diff = _KICKOFF_TOLERANCE
     for pred in user.predictions.values():
@@ -103,11 +123,14 @@ async def _process_finished_matches():
                     continue
 
                 sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
+                adv_pts = settings.stage_advancement_points(match.stage)
+                ru_pts = settings.stage_runner_up_points(match.stage)
                 pts = calculate_points(
                     pred["prediction"], match,
                     pred.get("predicted_home_goals"),
                     pred.get("predicted_away_goals"),
                     sign_pts, goal_diff_pts, exact_pts,
+                    adv_pts, ru_pts,
                 )
                 existing_pts = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
                     telegram_chat_id=user.telegram_chat_id,
@@ -120,6 +143,7 @@ async def _process_finished_matches():
                     predicted_away_goals=pred.get("predicted_away_goals"),
                     points=pts,
                     total_points=existing_pts + pts,
+                    points_runner_up=ru_pts,
                 )
                 sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
                 if sent:
@@ -127,6 +151,7 @@ async def _process_finished_matches():
                         pred["prediction"], match,
                         pred.get("predicted_home_goals"),
                         pred.get("predicted_away_goals"),
+                        ru_pts,
                     )
                     db.add(NotifiedMatch(
                         telegram_chat_id=user.telegram_chat_id,
@@ -173,12 +198,15 @@ async def _correct_match_scores(db: Session, match: APIMatch, settings) -> int:
         old_home = nm.home_score or 0
         old_away = nm.away_score or 0
         sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
+        adv_pts = settings.stage_advancement_points(match.stage)
+        ru_pts = settings.stage_runner_up_points(match.stage)
         new_pts = calculate_points(
             nm.prediction, match,
             nm.predicted_home_goals, nm.predicted_away_goals,
             sign_pts, goal_diff_pts, exact_pts,
+            adv_pts, ru_pts,
         )
-        new_cv = correct_value(nm.prediction, match, nm.predicted_home_goals, nm.predicted_away_goals)
+        new_cv = correct_value(nm.prediction, match, nm.predicted_home_goals, nm.predicted_away_goals, ru_pts)
         current_total = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
             telegram_chat_id=nm.telegram_chat_id,
         ).scalar() or 0
@@ -193,6 +221,7 @@ async def _correct_match_scores(db: Session, match: APIMatch, settings) -> int:
             old_points=nm.points or 0,
             new_points=new_pts,
             total_points=updated_total,
+            points_runner_up=ru_pts,
         )
         sent = await send_message(settings.telegram_bot_token, nm.telegram_chat_id, text)
         if sent:
@@ -390,10 +419,85 @@ async def _check_group_rankings():
         db.close()
 
 
+async def _check_r32_advancement():
+    """Award R32 qualification bonuses when all 12 groups are done and LAST_32 fixtures are known."""
+    settings = get_settings()
+    if not settings.football_data_api_key or not settings.telegram_bot_token:
+        return
+
+    db: Session = SessionLocal()
+    try:
+        # Only trigger when all 12 groups have position awards
+        if db.query(GroupRankingAward.group_name).distinct().count() < 12:
+            return
+
+        # Only run if there are rows with advancement_points not yet set
+        if not db.query(GroupRankingAward).filter(GroupRankingAward.advancement_points.is_(None)).first():
+            return
+
+        try:
+            r32_matches = await get_matches(settings.football_data_api_key, stage="LAST_32")
+        except Exception as e:
+            logger.error(f"Failed to fetch LAST_32 fixtures for R32 advancement check: {e}")
+            return
+
+        if not r32_matches:
+            return  # R32 fixtures not yet published
+
+        r32_teams = {m.home_team for m in r32_matches} | {m.away_team for m in r32_matches}
+
+        users: list[User] = db.query(User).all()
+        for user in users:
+            pending_awards = (
+                db.query(GroupRankingAward)
+                .filter_by(telegram_chat_id=user.telegram_chat_id)
+                .filter(GroupRankingAward.advancement_points.is_(None))
+                .all()
+            )
+            if not pending_awards:
+                continue
+
+            total_adv_pts = 0
+            group_lines = []
+
+            for award in sorted(pending_awards, key=lambda a: a.group_name):
+                pred_pos = award.pred_pos or []
+                adv = compute_r32_advancement_points(pred_pos, r32_teams)
+                award.advancement_points = adv
+                total_adv_pts += adv
+
+                pred1 = pred_pos[0] if len(pred_pos) > 0 else "?"
+                pred2 = pred_pos[1] if len(pred_pos) > 1 else "?"
+                mark1 = "✅" if pred1 in r32_teams else "❌"
+                mark2 = "✅" if pred2 in r32_teams else "❌"
+                group_lines.append(f"{award.group_name}:  {mark1} {pred1}  {mark2} {pred2}  +{adv}")
+
+            match_pts = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
+                telegram_chat_id=user.telegram_chat_id,
+            ).scalar() or 0
+            pos_pts = db.query(sa_func.sum(GroupRankingAward.points)).filter_by(
+                telegram_chat_id=user.telegram_chat_id,
+            ).scalar() or 0
+            total_pts = match_pts + pos_pts + total_adv_pts
+
+            text = (
+                f"🌍 <b>R32 Qualification Bonuses</b>\n\n"
+                + "\n".join(group_lines)
+                + f"\n\n<b>+{total_adv_pts} pts</b>  (total: {total_pts} pts)"
+            )
+            sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
+            if sent:
+                db.commit()
+                logger.info(f"R32 advancement notified: {user.name} → +{total_adv_pts} pts")
+    finally:
+        db.close()
+
+
 async def _check_matches():
     await _recheck_scores()
     await _process_finished_matches()
     await _check_group_rankings()
+    await _check_r32_advancement()
 
 
 async def _daily_recheck():
@@ -482,8 +586,10 @@ async def seed_past_matches(telegram_chat_id: str):
                 stage=match.stage,
             )
             if pred:
-                cv = correct_value(pred["prediction"], match, pred.get("predicted_home_goals"), pred.get("predicted_away_goals"))
-                pts = calculate_points(pred["prediction"], match, pred.get("predicted_home_goals"), pred.get("predicted_away_goals"), sign_pts, goal_diff_pts, exact_pts)
+                adv_pts = settings.stage_advancement_points(match.stage)
+                ru_pts = settings.stage_runner_up_points(match.stage)
+                cv = correct_value(pred["prediction"], match, pred.get("predicted_home_goals"), pred.get("predicted_away_goals"), ru_pts)
+                pts = calculate_points(pred["prediction"], match, pred.get("predicted_home_goals"), pred.get("predicted_away_goals"), sign_pts, goal_diff_pts, exact_pts, adv_pts, ru_pts)
                 entry.prediction = pred["prediction"]
                 entry.predicted_home_goals = pred.get("predicted_home_goals")
                 entry.predicted_away_goals = pred.get("predicted_away_goals")

@@ -61,9 +61,13 @@ def _stats_line(total: int, sign_only: int, goal_diff: int, exact: int) -> str:
 
 
 def _group_ranking_pts(db: Session, telegram_chat_id: str) -> int:
-    return db.query(sa_func.sum(GroupRankingAward.points)).filter_by(
+    pos_pts = db.query(sa_func.sum(GroupRankingAward.points)).filter_by(
         telegram_chat_id=telegram_chat_id,
     ).scalar() or 0
+    adv_pts = db.query(sa_func.sum(GroupRankingAward.advancement_points)).filter_by(
+        telegram_chat_id=telegram_chat_id,
+    ).scalar() or 0
+    return pos_pts + adv_pts
 
 
 def _build_status(user: User, notified: list[NotifiedMatch], group_rank_pts: int = 0) -> str:
@@ -87,7 +91,7 @@ def _build_status(user: User, notified: list[NotifiedMatch], group_rank_pts: int
         suffix = {"EXTRA_TIME": " aet", "PENALTY_SHOOTOUT": " pens"}.get(n.duration or "", "")
         result = f"{n.home_team} {score}{suffix} {n.away_team}"
 
-        mark = {2: "🎯", 1: "✅", 0: "❌"}.get(n.correct, "⚪")
+        mark = {3: "🥈", 2: "🎯", 1: "✅", 0: "❌"}.get(n.correct, "⚪")
 
         if n.prediction == "home":
             pred_label = n.home_team
@@ -174,15 +178,15 @@ def _prediction_line(pred: dict, nm_lookup: dict, utc_offset: float = 0.0) -> st
         except (ValueError, TypeError):
             pass
 
-    # Look up finished match by mapped English team names
+    # Look up finished match by mapped English team names (try both home/away orderings)
     home_en = normalize(spanish_to_english(home_es))
     away_en = normalize(spanish_to_english(away_es))
-    nm = nm_lookup.get((home_en, away_en))
+    nm = nm_lookup.get((home_en, away_en)) or nm_lookup.get((away_en, home_en))
 
     if nm and nm.home_score is not None:
         score = f"{nm.home_score}–{nm.away_score}"
         suffix = {"EXTRA_TIME": " aet", "PENALTY_SHOOTOUT": " pens"}.get(nm.duration or "", "")
-        mark = {2: "🎯", 1: "✅", 0: "❌"}.get(nm.correct, "⚪")
+        mark = {3: "🥈", 2: "🎯", 1: "✅", 0: "❌"}.get(nm.correct, "⚪")
         pts_str = f"  +{nm.points} pts" if nm.points is not None else ""
         return f"{mark} {kickoff_str} {nm.home_team} {score}{suffix} {nm.away_team}  › {pred_label}{pts_str}"
     else:
@@ -227,8 +231,10 @@ def _kickoff_dt(pred: dict) -> datetime:
 def _find_prediction_by_match(user: User, home_en: str, away_en: str) -> dict | None:
     preds = user.predictions or {}
     for pred in preds.values():
-        if (normalize(spanish_to_english(pred.get("home_team", ""))) == home_en
-                and normalize(spanish_to_english(pred.get("away_team", ""))) == away_en):
+        pred_home = normalize(spanish_to_english(pred.get("home_team", "")))
+        pred_away = normalize(spanish_to_english(pred.get("away_team", "")))
+        if (pred_home == home_en and pred_away == away_en) or \
+           (pred_home == away_en and pred_away == home_en):
             return pred
     return None
 
@@ -270,7 +276,7 @@ def _build_results(user: User, notified: list[NotifiedMatch]) -> list[str]:
     def is_finished(pred: dict) -> bool:
         home_en = normalize(spanish_to_english(pred.get("home_team", "")))
         away_en = normalize(spanish_to_english(pred.get("away_team", "")))
-        nm = nm_lookup.get((home_en, away_en))
+        nm = nm_lookup.get((home_en, away_en)) or nm_lookup.get((away_en, home_en))
         return nm is not None and nm.home_score is not None
 
     all_messages: list[str] = []
@@ -359,10 +365,11 @@ async def _handle_users(chat_id: str, bot_token: str, admin_chat_id: str):
             ).group_by(NotifiedMatch.telegram_chat_id).all()
         }
         grp_pts_by_user = {
-            cid: pts or 0
-            for cid, pts in db.query(
+            cid: (pos_pts or 0) + (adv_pts or 0)
+            for cid, pos_pts, adv_pts in db.query(
                 GroupRankingAward.telegram_chat_id,
                 sa_func.sum(GroupRankingAward.points),
+                sa_func.sum(GroupRankingAward.advancement_points),
             ).group_by(GroupRankingAward.telegram_chat_id).all()
         }
     finally:
@@ -386,10 +393,11 @@ async def _handle_standings(chat_id: str, bot_token: str):
         users: list[User] = db.query(User).all()
         all_notified = db.query(NotifiedMatch).filter(NotifiedMatch.home_team.isnot(None)).all()
         grp_pts_by_user: dict[str, int] = {
-            cid: (pts or 0)
-            for cid, pts in db.query(
+            cid: (pos_pts or 0) + (adv_pts or 0)
+            for cid, pos_pts, adv_pts in db.query(
                 GroupRankingAward.telegram_chat_id,
                 sa_func.sum(GroupRankingAward.points),
+                sa_func.sum(GroupRankingAward.advancement_points),
             ).group_by(GroupRankingAward.telegram_chat_id).all()
         }
     finally:
@@ -474,7 +482,7 @@ async def _handle_last(chat_id: str, bot_token: str):
         if not nm:
             lines.append(f"⚪ <b>{u.name}</b>  › no prediction")
             continue
-        mark = {2: "🎯", 1: "✅", 0: "❌"}.get(nm.correct, "⚪")
+        mark = {3: "🥈", 2: "🎯", 1: "✅", 0: "❌"}.get(nm.correct, "⚪")
         if nm.prediction == "home":
             pred_label = ref.home_team
         elif nm.prediction == "away":
@@ -512,7 +520,7 @@ async def _handle_next(chat_id: str, bot_token: str):
         for _match_num, pred in sorted_preds:
             home_en = normalize(spanish_to_english(pred.get("home_team", "")))
             away_en = normalize(spanish_to_english(pred.get("away_team", "")))
-            nm = nm_lookup.get((home_en, away_en))
+            nm = nm_lookup.get((home_en, away_en)) or nm_lookup.get((away_en, home_en))
             if nm is None or nm.home_score is None:
                 next_pred = pred
                 break

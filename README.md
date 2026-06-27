@@ -229,7 +229,13 @@ next - Next match not finished yet with your current pick
 
 ---
 
-## Notification examples
+## Notifications
+
+The bot sends the following automatic notifications. All are per-user and personalised.
+
+### Match result
+
+Sent after each match finishes and the score is confirmed.
 
 ```
 ⚽ Match finished
@@ -245,6 +251,59 @@ Brasil 1–2 Argentina
 
 Your prediction: Brasil wins (1–1)
 Wrong prediction ❌  +0 pts  (total: 8 pts)
+```
+
+Possible verdicts:
+
+| Verdict | Condition |
+|---------|-----------|
+| Exact score! 🎯 | Predicted the exact scoreline |
+| Correct result! ✅ | Predicted the right winner/draw |
+| Runner-up bonus! 🥈 | Predicted the team that LOSES the Final |
+| Wrong prediction ❌ | None of the above |
+
+For knockout matches the notification also includes the advancement bonus (+1 to +5 pts depending on stage) stacked on top of the sign/diff/exact points when the prediction is correct.
+
+### Score correction
+
+Sent ~10 minutes after the match result if the score changes (e.g. a late API update). Shows the old score, new score, and revised points.
+
+```
+⚠️ Score correction
+España 2–1 Francia (was 2–0)
+
+Your prediction: España wins (2–1)
+Exact score! 🎯  +4 pts  (pts: 2 → 4, total: 14 pts)
+```
+
+### Group final standings
+
+Sent once per group, when all three matchdays of that group are complete. Shows the user's predicted order vs. the actual order, and the points earned for correctly placed teams.
+
+```
+🏆 Group A final standings
+
+1st:  ✅  Germany  (you predicted: Germany)
+2nd:  ✅  Scotland  (you predicted: Scotland)
+3rd:  ❌  Switzerland  (you predicted: Hungary)
+4th:  ❌  Hungary  (you predicted: Switzerland)
+
+Group ranking: +2 pts  (total: 18 pts)
+```
+
+### R32 qualification bonuses
+
+Sent once, after all 12 groups are complete and the Round of 32 fixtures are published. Shows for each group whether the user's predicted top-2 teams actually qualified.
+
+```
+🌍 R32 Qualification Bonuses
+
+Group A:  ✅ Germany  ✅ Scotland  +2
+Group B:  ✅ Spain  ❌ Croatia  +1
+...
+Group L:  ✅ France  ✅ Argentina  +2
+
++18 pts  (total: 56 pts)
 ```
 
 ---

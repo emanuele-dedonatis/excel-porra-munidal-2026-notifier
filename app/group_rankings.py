@@ -71,6 +71,11 @@ def simulate_predicted_standings(
     )
 
 
+def compute_r32_advancement_points(pred_pos: list[str], r32_teams: set[str]) -> int:
+    """1 pt per team predicted 1st or 2nd in the group that actually qualified for R32."""
+    return sum(1 for team in pred_pos[:2] if team in r32_teams)
+
+
 def compute_ranking_points(
     predicted: list[str],
     actual: list[str],

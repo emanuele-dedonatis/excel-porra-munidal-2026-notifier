@@ -26,6 +26,9 @@ def _migrate_db():
         "users": {
             "utc_offset_hours": "REAL",
         },
+        "group_ranking_awards": {
+            "advancement_points": "INTEGER",
+        },
         "notified_matches": {
             "home_team": "VARCHAR",
             "away_team": "VARCHAR",

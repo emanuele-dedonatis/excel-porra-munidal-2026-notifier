@@ -23,10 +23,12 @@ class APIMatch:
     matchday: Optional[int]
 
 
-async def get_matches(api_key: str, status: Optional[str] = None) -> list[APIMatch]:
+async def get_matches(api_key: str, status: Optional[str] = None, stage: Optional[str] = None) -> list[APIMatch]:
     params: dict = {}
     if status:
         params["status"] = status
+    if stage:
+        params["stage"] = stage
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.get(

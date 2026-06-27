@@ -43,6 +43,16 @@ class Settings(BaseSettings):
 
     points_group_rank_position: int = 1   # points per correct group finishing position (1st/2nd/3rd/4th)
 
+    # Advancement bonus: pts awarded on top of sign/diff/exact when prediction is correct
+    # SF = 2 because a correct SF winner also implicitly identifies the 3rd-place team (the loser)
+    points_r32_advancement: int = 1
+    points_r16_advancement: int = 1
+    points_qf_advancement: int = 1
+    points_sf_advancement: int = 2
+    points_3rd_advancement: int = 1
+    points_final_advancement: int = 5   # champion bonus
+    points_final_runner_up: int = 3     # bonus for predicting the team that LOSES the Final
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     def stage_points(self, stage: str) -> tuple[int, int, int]:
@@ -56,6 +66,19 @@ class Settings(BaseSettings):
             "THIRD_PLACE":    (self.points_3rd_sign,   self.points_3rd_goal_diff,   self.points_3rd_exact),
             "FINAL":          (self.points_final_sign, self.points_final_goal_diff, self.points_final_exact),
         }.get(stage, (self.points_group_sign, self.points_group_goal_diff, self.points_group_exact))
+
+    def stage_advancement_points(self, stage: str) -> int:
+        return {
+            "LAST_32":        self.points_r32_advancement,
+            "LAST_16":        self.points_r16_advancement,
+            "QUARTER_FINALS": self.points_qf_advancement,
+            "SEMI_FINALS":    self.points_sf_advancement,
+            "THIRD_PLACE":    self.points_3rd_advancement,
+            "FINAL":          self.points_final_advancement,
+        }.get(stage, 0)
+
+    def stage_runner_up_points(self, stage: str) -> int:
+        return self.points_final_runner_up if stage == "FINAL" else 0
 
 
 @lru_cache

@@ -11,6 +11,17 @@ logger = logging.getLogger(__name__)
 _TELEGRAM_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
 
+def is_runner_up(prediction: str, match: APIMatch) -> bool:
+    """Return True if prediction matches the LOSER of a knockout match."""
+    if match.winner == "HOME_TEAM":
+        loser_en = match.away_team
+    elif match.winner == "AWAY_TEAM":
+        loser_en = match.home_team
+    else:
+        return False
+    return names_match(prediction, loser_en)
+
+
 def is_correct(prediction: str, match: APIMatch) -> bool:
     """Return True if the user's prediction matches the actual result."""
     if prediction in ("home", "away", "draw"):
@@ -50,11 +61,14 @@ def correct_value(
     match: APIMatch,
     predicted_home_goals: Optional[int],
     predicted_away_goals: Optional[int],
+    points_runner_up: int = 0,
 ) -> int:
-    """Return 2 for exact score, 1 for correct result, 0 for wrong."""
-    if not is_correct(prediction, match):
-        return 0
-    return 2 if is_exact_score(predicted_home_goals, predicted_away_goals, match) else 1
+    """Return 2 for exact score, 1 for correct result, 3 for runner-up, 0 for wrong."""
+    if is_correct(prediction, match):
+        return 2 if is_exact_score(predicted_home_goals, predicted_away_goals, match) else 1
+    if points_runner_up > 0 and is_runner_up(prediction, match):
+        return 3
+    return 0
 
 
 def calculate_points(
@@ -65,20 +79,24 @@ def calculate_points(
     points_sign: int,
     points_goal_diff: int,
     points_exact: int,
+    points_advancement: int = 0,
+    points_runner_up: int = 0,
 ) -> int:
     """Calculate points earned for this match prediction."""
-    if not is_correct(prediction, match):
-        return 0
-    pts = points_sign
-    if (predicted_home_goals is not None and predicted_away_goals is not None
-            and match.home_score is not None and match.away_score is not None):
-        pred_diff = predicted_home_goals - predicted_away_goals
-        actual_diff = match.home_score - match.away_score
-        if pred_diff == actual_diff:
-            pts += points_goal_diff
-            if predicted_home_goals == match.home_score and predicted_away_goals == match.away_score:
-                pts += points_exact
-    return pts
+    if is_correct(prediction, match):
+        pts = points_sign + points_advancement
+        if (predicted_home_goals is not None and predicted_away_goals is not None
+                and match.home_score is not None and match.away_score is not None):
+            pred_diff = predicted_home_goals - predicted_away_goals
+            actual_diff = match.home_score - match.away_score
+            if pred_diff == actual_diff:
+                pts += points_goal_diff
+                if predicted_home_goals == match.home_score and predicted_away_goals == match.away_score:
+                    pts += points_exact
+        return pts
+    if points_runner_up > 0 and is_runner_up(prediction, match):
+        return points_runner_up
+    return 0
 
 
 def build_message(
@@ -88,9 +106,10 @@ def build_message(
     predicted_away_goals: Optional[int],
     points: int,
     total_points: int,
+    points_runner_up: int = 0,
 ) -> str:
-    cv = correct_value(prediction, match, predicted_home_goals, predicted_away_goals)
-    correct = cv >= 1
+    cv = correct_value(prediction, match, predicted_home_goals, predicted_away_goals, points_runner_up)
+    correct = cv in (1, 2)
     exact = cv == 2
 
     result_line = f"{match.home_team} {match.home_score}–{match.away_score} {match.away_team}"
@@ -111,7 +130,9 @@ def build_message(
     if predicted_home_goals is not None and predicted_away_goals is not None:
         pred_text += f" ({predicted_home_goals}–{predicted_away_goals})"
 
-    if exact:
+    if cv == 3:
+        verdict = f"Runner-up bonus! 🥈  <b>+{points} pts</b>"
+    elif exact:
         verdict = f"Exact score! 🎯  <b>+{points} pts</b>"
     elif correct:
         verdict = f"Correct result! ✅  <b>+{points} pts</b>"
@@ -136,9 +157,10 @@ def build_correction_message(
     old_points: int,
     new_points: int,
     total_points: int,
+    points_runner_up: int = 0,
 ) -> str:
-    cv = correct_value(prediction, match, predicted_home_goals, predicted_away_goals)
-    correct = cv >= 1
+    cv = correct_value(prediction, match, predicted_home_goals, predicted_away_goals, points_runner_up)
+    correct = cv in (1, 2)
     exact = cv == 2
 
     result_line = f"{match.home_team} {match.home_score}–{match.away_score} {match.away_team}"
@@ -158,7 +180,9 @@ def build_correction_message(
     if predicted_home_goals is not None and predicted_away_goals is not None:
         pred_text += f" ({predicted_home_goals}–{predicted_away_goals})"
 
-    if exact:
+    if cv == 3:
+        verdict = f"Runner-up bonus! 🥈  <b>+{new_points} pts</b>"
+    elif exact:
         verdict = f"Exact score! 🎯  <b>+{new_points} pts</b>"
     elif correct:
         verdict = f"Correct result! ✅  <b>+{new_points} pts</b>"

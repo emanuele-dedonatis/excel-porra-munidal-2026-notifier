@@ -53,6 +53,7 @@ class GroupRankingAward(Base):
     pred_pos = Column(JSON)                        # [team1_en, team2_en, team3_en, team4_en]
     actual_pos = Column(JSON)                      # same format
     points = Column(Integer, default=0)
+    advancement_points = Column(Integer)   # NULL until R32 fixtures are known
     notified_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (UniqueConstraint("telegram_chat_id", "group_name"),)
