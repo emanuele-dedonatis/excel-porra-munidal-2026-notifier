@@ -262,7 +262,17 @@ Possible verdicts:
 | Runner-up bonus! 🥈 | Predicted the team that LOSES the Final |
 | Wrong prediction ❌ | None of the above |
 
-For knockout matches the notification also includes the advancement bonus (+1 to +5 pts depending on stage) stacked on top of the sign/diff/exact points when the prediction is correct.
+For knockout matches the points shown already include the advancement bonus stacked on top of sign/diff/exact:
+
+| Stage | Advancement bonus (if correct) |
+|-------|-------------------------------|
+| R32 | +1 (advances to R16) |
+| R16 | +1 (advances to QF) |
+| QF | +1 (advances to SF) |
+| SF | +2 (finalist +1, implicit 3rd-place team +1) |
+| 3rd-place match | +1 |
+| Final — correct winner | +5 (champion) |
+| Final — wrong winner, correct loser | +3 (runner-up, shown as 🥈) |
 
 ### Score correction
 
@@ -291,9 +301,9 @@ Sent once per group, when all three matchdays of that group are complete. Shows 
 Group ranking: +2 pts  (total: 18 pts)
 ```
 
-### R32 qualification bonuses
+### R32 qualification bonuses (group stage → R32)
 
-Sent once, after all 12 groups are complete and the Round of 32 fixtures are published. Shows for each group whether the user's predicted top-2 teams actually qualified.
+Sent **once**, after all 12 groups are complete and the Round of 32 fixtures are published by the API. This is a separate notification because all 32 qualifiers are known before any R32 match is played. Shows for each group whether the user's predicted top-2 teams actually qualified (1 pt each).
 
 ```
 🌍 R32 Qualification Bonuses
