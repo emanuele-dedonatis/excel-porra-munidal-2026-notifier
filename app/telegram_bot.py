@@ -600,6 +600,33 @@ async def _handle_recheck(chat_id: str, bot_token: str, admin_chat_id: str, dry_
     await send_message(bot_token, chat_id, f"🌍 <b>R32 bonus check</b>\n{r32_summary}")
 
 
+async def _handle_broadcast(chat_id: str, bot_token: str, admin_chat_id: str, args: str):
+    if chat_id != admin_chat_id:
+        await send_message(bot_token, chat_id, "⛔ This command is only available to the admin.")
+        return
+    text = args.strip()
+    if not text:
+        await send_message(bot_token, chat_id, "Usage: /broadcast &lt;message text&gt;")
+        return
+    db: Session = SessionLocal()
+    try:
+        users: list[User] = db.query(User).all()
+    finally:
+        db.close()
+    if not users:
+        await send_message(bot_token, chat_id, "No registered users to send to.")
+        return
+    full_text = f"📢 <b>Admin message:</b>\n\n{text}"
+    sent = failed = 0
+    for user in users:
+        ok = await send_message(bot_token, user.telegram_chat_id, full_text)
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+    await send_message(bot_token, chat_id, f"📢 Broadcast sent: {sent} delivered, {failed} failed.")
+
+
 async def _handle_delete(chat_id: str, bot_token: str, admin_chat_id: str, args: str):
     if chat_id != admin_chat_id:
         await send_message(bot_token, chat_id, "⛔ This command is only available to the admin.")
@@ -649,6 +676,8 @@ async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
         await _handle_next(chat_id, bot_token)
     elif cmd == "/users":
         await _handle_users(chat_id, bot_token, admin_chat_id)
+    elif cmd == "/broadcast":
+        await _handle_broadcast(chat_id, bot_token, admin_chat_id, args)
     elif cmd == "/delete":
         await _handle_delete(chat_id, bot_token, admin_chat_id, args)
     elif cmd == "/recheck":
