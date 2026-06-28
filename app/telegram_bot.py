@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from .database import SessionLocal
 from .models import GroupRankingAward, NotifiedMatch, User
 from .notifier import send_message
-from .scheduler import force_recheck_all
+from .scheduler import force_recheck_all, recalculate_r32_advancement
 from .team_names import names_match, normalize, spanish_to_english
 
 logger = logging.getLogger(__name__)
@@ -577,25 +577,27 @@ async def _handle_next(chat_id: str, bot_token: str):
         db.close()
 
 
-async def _handle_recheck(chat_id: str, bot_token: str, admin_chat_id: str):
+async def _handle_recheck(chat_id: str, bot_token: str, admin_chat_id: str, dry_run: bool = False):
     if chat_id != admin_chat_id:
         await send_message(bot_token, chat_id, "⛔ This command is only available to the admin.")
         return
 
-    await send_message(bot_token, chat_id, "⏳ Rechecking all match scores against the API…")
-    matches_checked, corrections = await force_recheck_all()
+    mode_label = " (dry run — no changes will be made)" if dry_run else ""
+    await send_message(bot_token, chat_id, f"⏳ Rechecking{mode_label}…")
 
-    if not corrections:
-        await send_message(
-            bot_token, chat_id,
-            f"✅ Recheck complete — {matches_checked} match(es) checked, all scores are correct."
-        )
-        return
+    if not dry_run:
+        matches_checked, corrections = await force_recheck_all()
+        if not corrections:
+            score_msg = f"✅ Match scores: {matches_checked} match(es) checked, all correct."
+        else:
+            lines = [f"🔄 Match scores: {matches_checked} match(es) checked\n"]
+            for match_label, old_score, new_score, user_count in corrections:
+                lines.append(f"✏️ <b>{match_label}</b>: {old_score} → {new_score}  ({user_count} user(s) corrected)")
+            score_msg = "\n".join(lines)
+        await send_message(bot_token, chat_id, score_msg)
 
-    lines = [f"🔄 Recheck complete — {matches_checked} match(es) checked\n"]
-    for match_label, old_score, new_score, user_count in corrections:
-        lines.append(f"✏️ <b>{match_label}</b>: {old_score} → {new_score}  ({user_count} user(s) corrected)")
-    await send_message(bot_token, chat_id, "\n".join(lines))
+    r32_summary = await recalculate_r32_advancement(dry_run=dry_run)
+    await send_message(bot_token, chat_id, f"🌍 <b>R32 bonus check</b>\n{r32_summary}")
 
 
 async def _handle_delete(chat_id: str, bot_token: str, admin_chat_id: str, args: str):
@@ -650,7 +652,8 @@ async def _handle_update(update: dict, bot_token: str, admin_chat_id: str):
     elif cmd == "/delete":
         await _handle_delete(chat_id, bot_token, admin_chat_id, args)
     elif cmd == "/recheck":
-        await _handle_recheck(chat_id, bot_token, admin_chat_id)
+        dry_run = args.strip().lower() in ("dry-run", "dry_run", "dryrun")
+        await _handle_recheck(chat_id, bot_token, admin_chat_id, dry_run=dry_run)
     elif cmd == "/chatid":
         await send_message(bot_token, chat_id, f"Your Telegram chat ID is: <code>{chat_id}</code>")
 

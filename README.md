@@ -225,7 +225,7 @@ next - Next match not finished yet with your current pick
 | `/status` | registered users | Points summary with ✅ sign / ⚽ goal diff / 🎯 exact / ❌ wrong counts |
 | `/users` | admin only | All registered users with their total points |
 | `/delete <chat_id>` | admin only | Remove a user and all their match records from the database |
-| `/recheck` | admin only | Re-fetch all match scores from the API, send correction messages to affected users, and report a summary |
+| `/recheck` | admin only | Re-fetch all match scores and recalculate R32 advancement bonuses; send corrections to affected users. Add `dry-run` to preview changes without sending anything |
 
 ---
 

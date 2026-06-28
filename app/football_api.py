@@ -86,7 +86,7 @@ async def get_standings(api_key: str) -> list[dict]:
         table = entry.get("table", [])
         if not group or not table:
             continue
-        played = table[0].get("playedGames", 0)
+        played = min(row.get("playedGames", 0) for row in table)
         teams = [row["team"]["name"] for row in table if row.get("team", {}).get("name")]
         result.append({"group": group, "teams": teams, "played": played})
     return result

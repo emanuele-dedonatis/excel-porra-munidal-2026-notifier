@@ -132,9 +132,11 @@ async def _process_finished_matches():
                     sign_pts, goal_diff_pts, exact_pts,
                     adv_pts, ru_pts,
                 )
-                existing_pts = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
-                    telegram_chat_id=user.telegram_chat_id,
-                ).scalar() or 0
+                existing_pts = (
+                    (db.query(sa_func.sum(NotifiedMatch.points)).filter_by(telegram_chat_id=user.telegram_chat_id).scalar() or 0)
+                    + (db.query(sa_func.sum(GroupRankingAward.points)).filter_by(telegram_chat_id=user.telegram_chat_id).scalar() or 0)
+                    + (db.query(sa_func.sum(GroupRankingAward.advancement_points)).filter_by(telegram_chat_id=user.telegram_chat_id).scalar() or 0)
+                )
 
                 text = build_message(
                     match=match,
@@ -207,9 +209,11 @@ async def _correct_match_scores(db: Session, match: APIMatch, settings) -> int:
             adv_pts, ru_pts,
         )
         new_cv = correct_value(nm.prediction, match, nm.predicted_home_goals, nm.predicted_away_goals, ru_pts)
-        current_total = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
-            telegram_chat_id=nm.telegram_chat_id,
-        ).scalar() or 0
+        current_total = (
+            (db.query(sa_func.sum(NotifiedMatch.points)).filter_by(telegram_chat_id=nm.telegram_chat_id).scalar() or 0)
+            + (db.query(sa_func.sum(GroupRankingAward.points)).filter_by(telegram_chat_id=nm.telegram_chat_id).scalar() or 0)
+            + (db.query(sa_func.sum(GroupRankingAward.advancement_points)).filter_by(telegram_chat_id=nm.telegram_chat_id).scalar() or 0)
+        )
         updated_total = current_total - (nm.points or 0) + new_pts
         text = build_correction_message(
             match=match,
@@ -346,6 +350,120 @@ async def force_recheck_all() -> tuple[int, list[tuple[str, str, str, int]]]:
         db.close()
 
 
+def _build_r32_bonus_lines(
+    awards: list,
+    r32_teams: set[str],
+) -> tuple[list[str], list[str], int]:
+    """Build group and 3rd-place display lines and compute total advancement pts."""
+    group_lines: list[str] = []
+    third_place_lines: list[str] = []
+    total_adv_pts = 0
+
+    for award in sorted(awards, key=lambda a: a.group_name):
+        pred_pos = award.pred_pos or []
+        actual_pos = award.actual_pos or []
+        adv = compute_r32_advancement_points(pred_pos, r32_teams)
+        total_adv_pts += adv
+
+        pred1 = pred_pos[0] if len(pred_pos) > 0 else "?"
+        pred2 = pred_pos[1] if len(pred_pos) > 1 else "?"
+        mark1 = "✅" if pred1 in r32_teams else "❌"
+        mark2 = "✅" if pred2 in r32_teams else "❌"
+        group_lines.append(f"{award.group_name}:  {mark1} {pred1}  {mark2} {pred2}  +{adv}")
+
+        actual_3rd = actual_pos[2] if len(actual_pos) > 2 else None
+        if actual_3rd and actual_3rd in r32_teams:
+            pred3 = pred_pos[2] if len(pred_pos) > 2 else "?"
+            mark3 = "✅" if pred3 in r32_teams else "❌"
+            if pred3 == actual_3rd:
+                third_place_lines.append(f"{award.group_name}: {mark3} {pred3}")
+            else:
+                third_place_lines.append(f"{award.group_name}: {mark3} {pred3}  (actual: {actual_3rd})")
+
+    return group_lines, third_place_lines, total_adv_pts
+
+
+async def recalculate_r32_advancement(dry_run: bool = False) -> str:
+    """
+    Recompute R32 advancement bonuses for all users using the current (fixed) formula.
+    dry_run=True: sends each user's corrected R32 message as a preview to the admin only,
+                  returns a summary of point changes without touching the DB.
+    dry_run=False: resets all advancement_points to None and re-runs _check_r32_advancement().
+    """
+    settings = get_settings()
+    if not settings.football_data_api_key:
+        return "❌ Missing API key"
+
+    db: Session = SessionLocal()
+    try:
+        group_count = db.query(GroupRankingAward.group_name).distinct().count()
+        if group_count < 12:
+            return f"⚠️ Only {group_count}/12 groups have awards — R32 bonus not ready"
+
+        try:
+            r32_matches = await get_matches(settings.football_data_api_key, stage="LAST_32")
+        except Exception as e:
+            return f"❌ Failed to fetch R32 fixtures: {e}"
+
+        if not r32_matches:
+            return "⚠️ No LAST_32 fixtures available from the API yet"
+
+        r32_teams = {m.home_team for m in r32_matches} | {m.away_team for m in r32_matches}
+
+        users: list[User] = db.query(User).all()
+        summary_lines: list[str] = []
+        changed_count = 0
+
+        for user in users:
+            awards = db.query(GroupRankingAward).filter_by(telegram_chat_id=user.telegram_chat_id).all()
+            if not awards:
+                continue
+
+            old_adv = sum(a.advancement_points or 0 for a in awards)
+            group_lines, third_place_lines, new_adv = _build_r32_bonus_lines(awards, r32_teams)
+
+            if old_adv != new_adv:
+                changed_count += 1
+                summary_lines.append(f"• {user.name}: {old_adv} → {new_adv} pts")
+
+            if dry_run and settings.telegram_bot_token and settings.admin_telegram_chat_id:
+                match_pts = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
+                    telegram_chat_id=user.telegram_chat_id,
+                ).scalar() or 0
+                pos_pts = db.query(sa_func.sum(GroupRankingAward.points)).filter_by(
+                    telegram_chat_id=user.telegram_chat_id,
+                ).scalar() or 0
+                total_pts = match_pts + pos_pts + new_adv
+
+                body = "\n".join(group_lines)
+                if third_place_lines:
+                    body += "\n\n<b>Best 3rd places:</b>\n" + "\n".join(third_place_lines)
+                pts_change = f"{old_adv} → {new_adv}" if old_adv != new_adv else str(new_adv)
+                preview_text = (
+                    f"🔍 <b>[Preview for {user.name}] R32 Qualification Bonuses</b>\n\n"
+                    + body
+                    + f"\n\n<b>+{pts_change} pts</b>  (total: {total_pts} pts)"
+                )
+                await send_message(settings.telegram_bot_token, settings.admin_telegram_chat_id, preview_text)
+
+        if not changed_count and not dry_run:
+            return "✅ R32 bonuses are already correct — no changes needed"
+
+        summary = "\n".join(summary_lines) if summary_lines else "No point changes."
+        if dry_run:
+            return f"🔍 <b>[Dry run summary]</b>\n{summary}"
+
+        # Live mode: reset all advancement_points and re-run
+        for award in db.query(GroupRankingAward).all():
+            award.advancement_points = None
+        db.commit()
+    finally:
+        db.close()
+
+    await _check_r32_advancement(is_correction=True)
+    return f"✅ R32 bonuses recalculated and re-sent to {changed_count} user(s)\n{summary}"
+
+
 async def _check_group_rankings():
     """Award group position points once each group's 3 matchdays are complete."""
     settings = get_settings()
@@ -398,7 +516,10 @@ async def _check_group_rankings():
                 ranking_pts = db.query(sa_func.sum(GroupRankingAward.points)).filter_by(
                     telegram_chat_id=user.telegram_chat_id,
                 ).scalar() or 0
-                total_pts = match_pts + ranking_pts + pts
+                adv_pts_existing = db.query(sa_func.sum(GroupRankingAward.advancement_points)).filter_by(
+                    telegram_chat_id=user.telegram_chat_id,
+                ).scalar() or 0
+                total_pts = match_pts + ranking_pts + adv_pts_existing + pts
 
                 text = build_group_ranking_message(group_name, predicted_pos, actual_pos, pts, total_pts)
                 sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
@@ -419,7 +540,7 @@ async def _check_group_rankings():
         db.close()
 
 
-async def _check_r32_advancement():
+async def _check_r32_advancement(is_correction: bool = False):
     """Award R32 qualification bonuses when all 12 groups are done and LAST_32 fixtures are known."""
     settings = get_settings()
     if not settings.football_data_api_key or not settings.telegram_bot_token:
@@ -457,20 +578,11 @@ async def _check_r32_advancement():
             if not pending_awards:
                 continue
 
-            total_adv_pts = 0
-            group_lines = []
+            group_lines, third_place_lines, total_adv_pts = _build_r32_bonus_lines(pending_awards, r32_teams)
 
-            for award in sorted(pending_awards, key=lambda a: a.group_name):
-                pred_pos = award.pred_pos or []
-                adv = compute_r32_advancement_points(pred_pos, r32_teams)
-                award.advancement_points = adv
-                total_adv_pts += adv
-
-                pred1 = pred_pos[0] if len(pred_pos) > 0 else "?"
-                pred2 = pred_pos[1] if len(pred_pos) > 1 else "?"
-                mark1 = "✅" if pred1 in r32_teams else "❌"
-                mark2 = "✅" if pred2 in r32_teams else "❌"
-                group_lines.append(f"{award.group_name}:  {mark1} {pred1}  {mark2} {pred2}  +{adv}")
+            # Persist the computed advancement_points
+            for award in pending_awards:
+                award.advancement_points = compute_r32_advancement_points(award.pred_pos or [], r32_teams)
 
             match_pts = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
                 telegram_chat_id=user.telegram_chat_id,
@@ -480,11 +592,12 @@ async def _check_r32_advancement():
             ).scalar() or 0
             total_pts = match_pts + pos_pts + total_adv_pts
 
-            text = (
-                f"🌍 <b>R32 Qualification Bonuses</b>\n\n"
-                + "\n".join(group_lines)
-                + f"\n\n<b>+{total_adv_pts} pts</b>  (total: {total_pts} pts)"
-            )
+            header = "🌍 <b>R32 Qualification Bonuses (corrected)</b>" if is_correction else "🌍 <b>R32 Qualification Bonuses</b>"
+            body = "\n".join(group_lines)
+            if third_place_lines:
+                body += "\n\n<b>Best 3rd places:</b>\n" + "\n".join(third_place_lines)
+            text = f"{header}\n\n{body}\n\n<b>+{total_adv_pts} pts</b>  (total: {total_pts} pts)"
+
             sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
             if sent:
                 db.commit()
