@@ -57,10 +57,73 @@ def _migrate_db():
         conn.commit()
 
 
+def _migrate_round_labels():
+    """Normalise stored knockout round labels and clear stale 'no prediction' rows.
+
+    Older uploads stored the raw match number (e.g. "76") as the knockout round label
+    instead of the canonical "1/32"/"1/16"/… that the scheduler matches against, so
+    knockout predictions were never found and users were told "you didn't predict this
+    match". Re-derive the label from the match number (the prediction dict key) and, for
+    any match a user was wrongly told they didn't predict, delete the NotifiedMatch row so
+    the scheduler re-notifies it correctly. Idempotent: after re-notification the row has a
+    prediction and is left untouched.
+    """
+    from .excel_parser import _round_label_for
+    from .models import NotifiedMatch, User
+    from .scheduler import _find_prediction
+    from .football_api import APIMatch
+    from sqlalchemy.orm.attributes import flag_modified
+    from datetime import datetime, timezone
+
+    db: Session = SessionLocal()
+    try:
+        users = db.query(User).all()
+        for user in users:
+            preds = user.predictions or {}
+            changed = False
+            for key, pred in preds.items():
+                try:
+                    match_num = int(key)
+                except (TypeError, ValueError):
+                    continue
+                canonical = _round_label_for(match_num, pred.get("round_label"))
+                if pred.get("round_label") != canonical:
+                    pred["round_label"] = canonical
+                    changed = True
+            if changed:
+                flag_modified(user, "predictions")  # JSON mutated in place; force an UPDATE
+                logger.info(f"Migration: normalised knockout round labels for {user.name}")
+
+        db.commit()
+
+        # Re-notify matches that were wrongly recorded as "no prediction".
+        stale = db.query(NotifiedMatch).filter(NotifiedMatch.prediction.is_(None)).all()
+        users_by_chat = {u.telegram_chat_id: u for u in users}
+        for nm in stale:
+            user = users_by_chat.get(nm.telegram_chat_id)
+            if user is None:
+                continue
+            match = APIMatch(
+                id=nm.api_match_id, home_team=nm.home_team, away_team=nm.away_team,
+                kickoff_utc=datetime.now(timezone.utc), status="FINISHED",
+                home_score=nm.home_score, away_score=nm.away_score,
+                winner=nm.winner, duration=nm.duration,
+                stage=nm.stage or "GROUP_STAGE", matchday=None,
+            )
+            if _find_prediction(user, match) is not None:
+                db.delete(nm)
+                logger.info(f"Migration: clearing stale no-prediction row for {user.name} "
+                            f"({nm.home_team} vs {nm.away_team}) — will re-notify")
+        db.commit()
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
     _migrate_db()
+    _migrate_round_labels()
     start_scheduler()
     settings = get_settings()
     bot_task = None

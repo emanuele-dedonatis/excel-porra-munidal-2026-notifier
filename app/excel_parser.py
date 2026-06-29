@@ -21,6 +21,27 @@ _GROUP_OUTCOME_MAP = {
     "Empate": "draw",
 }
 
+# Match-number ranges → canonical knockout round label (WC 2026: 104 matches).
+# The Excel template's round-label column (Z) holds J1/J2/J3 for group rows but the
+# raw match number for knockout rows, so we derive the label from the match number
+# to keep it in sync with the labels the scheduler matches against.
+_KNOCKOUT_ROUND_LABELS = [
+    (range(73, 89),   "1/32"),
+    (range(89, 97),   "1/16"),
+    (range(97, 101),  "1/4"),
+    (range(101, 103), "1/2"),
+    (range(103, 104), "3/4"),
+    (range(104, 105), "Final"),
+]
+
+
+def _round_label_for(match_num: int, cell_value) -> str:
+    """Canonical round label: derived from match number for knockouts, else the cell value."""
+    for rng, label in _KNOCKOUT_ROUND_LABELS:
+        if match_num in rng:
+            return label
+    return str(cell_value or "")
+
 
 @dataclass
 class MatchPrediction:
@@ -97,7 +118,7 @@ def _parse_predictions_from_wb(wb, utc_offset_hours: float) -> dict[int, "MatchP
             except (TypeError, ValueError):
                 return None
 
-        round_label = ws.cell(row=row_idx, column=_COL_ROUND_LABEL).value or ""
+        round_label = _round_label_for(match_num, ws.cell(row=row_idx, column=_COL_ROUND_LABEL).value)
 
         predictions[match_num] = MatchPrediction(
             match_number=match_num,
