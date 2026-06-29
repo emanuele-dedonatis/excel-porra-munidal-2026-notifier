@@ -6,10 +6,12 @@ import httpx
 from sqlalchemy import func as sa_func
 from sqlalchemy.orm import Session
 
+from .config import get_settings
 from .database import SessionLocal
+from .football_api import get_matches
 from .models import GroupRankingAward, NotifiedMatch, User
 from .notifier import send_message
-from .scheduler import force_recheck_all, recalculate_r32_advancement
+from .scheduler import _find_prediction, force_recheck_all, recalculate_r32_advancement
 from .team_names import names_match, normalize, spanish_to_english
 
 logger = logging.getLogger(__name__)
@@ -513,66 +515,70 @@ async def _handle_next(chat_id: str, bot_token: str):
         utc_offset = user.utc_offset_hours or 0.0
         users: list[User] = db.query(User).order_by(User.name).all()
 
-        # The "next match" must be the same for everyone: the earliest match of
-        # the tournament that hasn't kicked off yet, across all users'
-        # predictions (a user who didn't predict it still sees it).
-        # A finished-but-not-yet-scored match has no score row, so we rely on
-        # kickoff time rather than score presence.
+        # The "next match" must be the same for everyone and reflect the real
+        # tournament schedule — not any single user's predictions (knockout
+        # brackets diverge per user, and some uploads have corrupt kickoffs).
+        # So we take the next real fixture from the football API and correlate
+        # each user's prediction to it via the same logic used for scoring.
         now = datetime.now(timezone.utc)
-        next_pred = None
-        next_kickoff = None
-        for u in users:
-            for pred in (u.predictions or {}).values():
-                kickoff = _kickoff_dt(pred)
-                if kickoff.tzinfo is None:
-                    kickoff = kickoff.replace(tzinfo=timezone.utc)
-                if kickoff > now and (next_kickoff is None or kickoff < next_kickoff):
-                    next_kickoff = kickoff
-                    next_pred = pred
+        try:
+            api_matches = await get_matches(get_settings().football_data_api_key)
+        except Exception:
+            logger.exception("/next: failed to fetch fixtures")
+            api_matches = []
 
-        if not next_pred:
+        # Earliest non-finished match — this includes a match that's currently
+        # being played (kickoff already passed), since that's the next result
+        # to be scored.
+        pending = sorted(
+            (m for m in api_matches if m.status != "FINISHED"),
+            key=lambda m: m.kickoff_utc,
+        )
+        next_match = pending[0] if pending else None
+
+        if next_match is None:
             await send_message(bot_token, chat_id, "✅ All matches are finished — no next match available.")
             return
 
-        kickoff_str = "?"
-        kickoff_iso = next_pred.get("kickoff_utc")
-        if kickoff_iso:
-            try:
-                dt = datetime.fromisoformat(kickoff_iso) + timedelta(hours=utc_offset)
-                kickoff_str = dt.strftime("%d %b %H:%M")
-            except (ValueError, TypeError):
-                pass
+        ongoing = next_match.status in ("IN_PLAY", "PAUSED")
+        kickoff_str = (next_match.kickoff_utc + timedelta(hours=utc_offset)).strftime("%d %b %H:%M")
 
-        home_es = next_pred.get("home_team", "?")
-        away_es = next_pred.get("away_team", "?")
-        prediction = next_pred.get("prediction") or "—"
-        pred_hg = next_pred.get("predicted_home_goals")
-        pred_ag = next_pred.get("predicted_away_goals")
-        pred_label = _prediction_label(prediction, home_es, away_es, pred_hg, pred_ag)
+        # Per-user predictions for this fixture (None if they didn't predict
+        # this matchup — consistent with how scoring treats it).
+        user_preds = {u.telegram_chat_id: _find_prediction(u, next_match) for u in users}
 
-        match_home_en = normalize(spanish_to_english(home_es))
-        match_away_en = normalize(spanish_to_english(away_es))
+        # Header teams: prefer a Spanish-named prediction that matches the
+        # fixture; fall back to the API's (English) team names.
+        header_home, header_away = next_match.home_team, next_match.away_team
+        for pred in user_preds.values():
+            if pred is not None:
+                header_home = pred.get("home_team", header_home)
+                header_away = pred.get("away_team", header_away)
+                break
 
-        lines = [
-            f"⏭️ <b>Next match</b>",
-            f"{kickoff_str} <b>{home_es} vs {away_es}</b>\n",
-        ]
+        if ongoing:
+            lines = [
+                f"🟢 <b>Ongoing match</b>",
+                f"{kickoff_str} <b>{header_home} vs {header_away}</b>\n",
+            ]
+        else:
+            lines = [
+                f"⏭️ <b>Next match</b>",
+                f"{kickoff_str} <b>{header_home} vs {header_away}</b>\n",
+            ]
 
         for other in users:
-            other_match = _find_prediction_by_match(other, match_home_en, match_away_en)
+            other_match = user_preds.get(other.telegram_chat_id)
             if other_match is None:
                 lines.append(f"⚪ <b>{other.name}</b>  › no prediction")
                 continue
 
-            other_prediction = other_match.get("prediction") or "—"
-            other_pred_hg = other_match.get("predicted_home_goals")
-            other_pred_ag = other_match.get("predicted_away_goals")
             other_label = _prediction_label(
-                other_prediction,
+                other_match.get("prediction") or "—",
                 other_match.get("home_team", "?"),
                 other_match.get("away_team", "?"),
-                other_pred_hg,
-                other_pred_ag,
+                other_match.get("predicted_home_goals"),
+                other_match.get("predicted_away_goals"),
             )
             lines.append(f"⚪ <b>{other.name}</b>  › {other_label}")
 
