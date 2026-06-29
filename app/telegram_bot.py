@@ -510,18 +510,20 @@ async def _handle_next(chat_id: str, bot_token: str):
             )
             return
 
-        notified = db.query(NotifiedMatch).filter_by(telegram_chat_id=chat_id).all()
-        nm_lookup = _build_nm_lookup(notified)
         preds = user.predictions or {}
         sorted_preds = sorted(((int(k), v) for k, v in preds.items()), key=lambda x: _kickoff_dt(x[1]))
         utc_offset = user.utc_offset_hours or 0.0
 
+        now = datetime.now(timezone.utc)
         next_pred = None
         for _match_num, pred in sorted_preds:
-            home_en = normalize(spanish_to_english(pred.get("home_team", "")))
-            away_en = normalize(spanish_to_english(pred.get("away_team", "")))
-            nm = nm_lookup.get((home_en, away_en)) or nm_lookup.get((away_en, home_en))
-            if nm is None or nm.home_score is None:
+            kickoff = _kickoff_dt(pred)
+            if kickoff.tzinfo is None:
+                kickoff = kickoff.replace(tzinfo=timezone.utc)
+            # The next match is the earliest one that hasn't kicked off yet.
+            # (A finished-but-not-yet-scored match still has no NotifiedMatch
+            # row, so we can't rely on score presence alone.)
+            if kickoff > now:
                 next_pred = pred
                 break
 
