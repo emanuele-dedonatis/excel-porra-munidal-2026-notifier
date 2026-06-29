@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone, timedelta
 
 import httpx
@@ -12,7 +13,7 @@ from .football_api import get_matches
 from .models import GroupRankingAward, NotifiedMatch, User
 from .notifier import send_message
 from .scheduler import _find_prediction, force_recheck_all, recalculate_r32_advancement
-from .team_names import names_match, normalize, spanish_to_english
+from .team_names import ENGLISH_TO_SPANISH, names_match, normalize, spanish_to_english
 
 logger = logging.getLogger(__name__)
 
@@ -501,6 +502,28 @@ async def _handle_last(chat_id: str, bot_token: str):
     await send_message(bot_token, chat_id, "\n".join(lines))
 
 
+# Cache of the full fixtures list so repeated /next calls don't hit the API
+# more than once per minute. The cached data still carries live scores.
+_FIXTURES_CACHE_TTL = 60.0
+_fixtures_cache: tuple[float, list] | None = None
+
+
+async def _get_fixtures_cached() -> list:
+    """Return tournament fixtures, refreshing from the API at most once per
+    minute. On failure, fall back to the last cached value if available."""
+    global _fixtures_cache
+    now = time.monotonic()
+    if _fixtures_cache and now - _fixtures_cache[0] < _FIXTURES_CACHE_TTL:
+        return _fixtures_cache[1]
+    try:
+        matches = await get_matches(get_settings().football_data_api_key)
+        _fixtures_cache = (now, matches)
+        return matches
+    except Exception:
+        logger.exception("/next: failed to fetch fixtures")
+        return _fixtures_cache[1] if _fixtures_cache else []
+
+
 async def _handle_next(chat_id: str, bot_token: str):
     db: Session = SessionLocal()
     try:
@@ -520,12 +543,7 @@ async def _handle_next(chat_id: str, bot_token: str):
         # brackets diverge per user, and some uploads have corrupt kickoffs).
         # So we take the next real fixture from the football API and correlate
         # each user's prediction to it via the same logic used for scoring.
-        now = datetime.now(timezone.utc)
-        try:
-            api_matches = await get_matches(get_settings().football_data_api_key)
-        except Exception:
-            logger.exception("/next: failed to fetch fixtures")
-            api_matches = []
+        api_matches = await _get_fixtures_cached()
 
         # Earliest non-finished match — this includes a match that's currently
         # being played (kickoff already passed), since that's the next result
@@ -547,19 +565,18 @@ async def _handle_next(chat_id: str, bot_token: str):
         # this matchup — consistent with how scoring treats it).
         user_preds = {u.telegram_chat_id: _find_prediction(u, next_match) for u in users}
 
-        # Header teams: prefer a Spanish-named prediction that matches the
-        # fixture; fall back to the API's (English) team names.
-        header_home, header_away = next_match.home_team, next_match.away_team
-        for pred in user_preds.values():
-            if pred is not None:
-                header_home = pred.get("home_team", header_home)
-                header_away = pred.get("away_team", header_away)
-                break
+        # Header teams come from the API (real fixture), translated to Spanish
+        # and kept in home/away order so a live score stays aligned.
+        header_home = ENGLISH_TO_SPANISH.get(next_match.home_team, next_match.home_team)
+        header_away = ENGLISH_TO_SPANISH.get(next_match.away_team, next_match.away_team)
 
         if ongoing:
+            score = ""
+            if next_match.home_score is not None and next_match.away_score is not None:
+                score = f"  ⚽ {next_match.home_score}–{next_match.away_score}"
             lines = [
                 f"🟢 <b>Ongoing match</b>",
-                f"{kickoff_str} <b>{header_home} vs {header_away}</b>\n",
+                f"{kickoff_str} <b>{header_home} vs {header_away}</b>{score}\n",
             ]
         else:
             lines = [
