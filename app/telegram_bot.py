@@ -510,22 +510,25 @@ async def _handle_next(chat_id: str, bot_token: str):
             )
             return
 
-        preds = user.predictions or {}
-        sorted_preds = sorted(((int(k), v) for k, v in preds.items()), key=lambda x: _kickoff_dt(x[1]))
         utc_offset = user.utc_offset_hours or 0.0
+        users: list[User] = db.query(User).order_by(User.name).all()
 
+        # The "next match" must be the same for everyone: the earliest match of
+        # the tournament that hasn't kicked off yet, across all users'
+        # predictions (a user who didn't predict it still sees it).
+        # A finished-but-not-yet-scored match has no score row, so we rely on
+        # kickoff time rather than score presence.
         now = datetime.now(timezone.utc)
         next_pred = None
-        for _match_num, pred in sorted_preds:
-            kickoff = _kickoff_dt(pred)
-            if kickoff.tzinfo is None:
-                kickoff = kickoff.replace(tzinfo=timezone.utc)
-            # The next match is the earliest one that hasn't kicked off yet.
-            # (A finished-but-not-yet-scored match still has no NotifiedMatch
-            # row, so we can't rely on score presence alone.)
-            if kickoff > now:
-                next_pred = pred
-                break
+        next_kickoff = None
+        for u in users:
+            for pred in (u.predictions or {}).values():
+                kickoff = _kickoff_dt(pred)
+                if kickoff.tzinfo is None:
+                    kickoff = kickoff.replace(tzinfo=timezone.utc)
+                if kickoff > now and (next_kickoff is None or kickoff < next_kickoff):
+                    next_kickoff = kickoff
+                    next_pred = pred
 
         if not next_pred:
             await send_message(bot_token, chat_id, "✅ All matches are finished — no next match available.")
@@ -547,7 +550,6 @@ async def _handle_next(chat_id: str, bot_token: str):
         pred_ag = next_pred.get("predicted_away_goals")
         pred_label = _prediction_label(prediction, home_es, away_es, pred_hg, pred_ag)
 
-        users: list[User] = db.query(User).order_by(User.name).all()
         match_home_en = normalize(spanish_to_english(home_es))
         match_away_en = normalize(spanish_to_english(away_es))
 
