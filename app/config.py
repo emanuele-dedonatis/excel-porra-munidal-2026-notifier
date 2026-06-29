@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./data/app.db"
     poll_interval_seconds: int = 300
     score_recheck_delay_seconds: int = 600
+    # Notify users about finished matches they did NOT predict (0 pts), but only
+    # if the match finished within this many hours — avoids back-filling the whole
+    # tournament's missed matches at once. Set to 0 to disable no-prediction notifications.
+    no_prediction_max_age_hours: int = 48
     admin_telegram_chat_id: str = ""
     debug: bool = False
 

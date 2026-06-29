@@ -33,7 +33,7 @@ app/
 └── templates/       # Jinja2 HTML (registration UI)
 ```
 
-**Flow**: scheduler polls football-data.org → match FINISHED but no score → ESPN fallback → score resolved → compare against user predictions → send Telegram notification per user.
+**Flow**: scheduler polls football-data.org → match FINISHED but no score → ESPN fallback → score resolved → compare against user predictions → send Telegram notification per user. Users who didn't predict a match also get a "no prediction, +0 pts" notification, but only for matches finished within `NO_PREDICTION_MAX_AGE_HOURS` (avoids back-filling the whole tournament).
 
 ---
 
@@ -57,6 +57,7 @@ app/
 | `DATABASE_URL` | SQLite path | `sqlite:///./data/app.db` |
 | `POLL_INTERVAL_SECONDS` | Match-check frequency | `300` |
 | `SCORE_RECHECK_DELAY_SECONDS` | Seconds after notification to re-check score for corrections | `600` |
+| `NO_PREDICTION_MAX_AGE_HOURS` | Notify users about finished matches they didn't predict (0 pts) only if finished within this many hours; `0` disables no-prediction notifications | `48` |
 | `DEBUG` | FastAPI debug mode | `false` |
 | `APP_PORT` | Host port for web container | `8000` |
 | `HTTP_PORT` | Nginx HTTP port (https profile) | `80` |

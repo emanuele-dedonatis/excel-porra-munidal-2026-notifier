@@ -108,15 +108,23 @@ def build_message(
     total_points: int,
     points_runner_up: int = 0,
 ) -> str:
-    cv = correct_value(prediction, match, predicted_home_goals, predicted_away_goals, points_runner_up)
-    correct = cv in (1, 2)
-    exact = cv == 2
-
     result_line = f"{match.home_team} {match.home_score}–{match.away_score} {match.away_team}"
 
     if match.duration and match.duration != "REGULAR":
         duration_note = {"EXTRA_TIME": " (a.e.t.)", "PENALTY_SHOOTOUT": " (pens.)"}.get(match.duration, "")
         result_line += duration_note
+
+    if prediction is None:
+        return (
+            f"⚽ <b>Match finished</b>\n"
+            f"<b>{result_line}</b>\n\n"
+            f"You didn't predict this match.\n"
+            f"No prediction ⚪  +0 pts  (total: {total_points} pts)"
+        )
+
+    cv = correct_value(prediction, match, predicted_home_goals, predicted_away_goals, points_runner_up)
+    correct = cv in (1, 2)
+    exact = cv == 2
 
     if prediction == "home":
         pred_text = f"{match.home_team} win"

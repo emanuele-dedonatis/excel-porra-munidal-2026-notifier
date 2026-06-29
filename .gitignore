@@ -27,6 +27,7 @@ data/*.sqlite
 uploads/
 
 # Excel prediction files (personal data)
+examples/
 *.xlsx
 *.xls
 

@@ -118,6 +118,7 @@ Without the `https` profile, only the app is started (plain HTTP on port `8000`,
 | `DATABASE_URL` | SQLite path | `sqlite:///./data/app.db` |
 | `POLL_INTERVAL_SECONDS` | How often to check for results | `300` (5 min) |
 | `SCORE_RECHECK_DELAY_SECONDS` | Seconds after notification to re-check the score for corrections | `600` (10 min) |
+| `NO_PREDICTION_MAX_AGE_HOURS` | Also notify (0 pts) about finished matches you didn't predict, if finished within this many hours; `0` disables it | `48` |
 | `DEBUG` | Enable FastAPI debug mode | `false` |
 | `APP_PORT` | Host port the web container is exposed on | `8000` |
 | `HTTP_PORT` | Nginx HTTP port (https profile only) | `80` |
@@ -254,6 +255,16 @@ Your prediction: Brasil wins (1–1)
 Wrong prediction ❌  +0 pts  (total: 8 pts)
 ```
 
+If you didn't predict the match at all, you still get a notification (0 pts), as long as the match finished within `NO_PREDICTION_MAX_AGE_HOURS`:
+
+```
+⚽ Match finished
+South Africa 2–1 Canada
+
+You didn't predict this match.
+No prediction ⚪  +0 pts  (total: 8 pts)
+```
+
 Possible verdicts:
 
 | Verdict | Condition |
@@ -262,6 +273,7 @@ Possible verdicts:
 | Correct result! ✅ | Predicted the right winner/draw |
 | Runner-up bonus! 🥈 | Predicted the team that LOSES the Final |
 | Wrong prediction ❌ | None of the above |
+| No prediction ⚪ | You didn't predict this match |
 
 For knockout matches the points shown already include the advancement bonus stacked on top of sign/diff/exact:
 

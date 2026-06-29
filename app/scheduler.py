@@ -119,19 +119,39 @@ async def _process_finished_matches():
                     continue
 
                 pred = _find_prediction(user, match)
-                if pred is None:
-                    continue
 
                 sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
                 adv_pts = settings.stage_advancement_points(match.stage)
                 ru_pts = settings.stage_runner_up_points(match.stage)
-                pts = calculate_points(
-                    pred["prediction"], match,
-                    pred.get("predicted_home_goals"),
-                    pred.get("predicted_away_goals"),
-                    sign_pts, goal_diff_pts, exact_pts,
-                    adv_pts, ru_pts,
-                )
+                if pred is None:
+                    # User didn't predict this match — notify with 0 pts, but only for
+                    # recently finished matches to avoid back-filling the whole tournament.
+                    max_age = settings.no_prediction_max_age_hours
+                    if max_age <= 0:
+                        continue
+                    age = datetime.now(timezone.utc) - match.kickoff_utc
+                    if age > timedelta(hours=max_age):
+                        continue
+                    prediction = None
+                    predicted_home_goals = None
+                    predicted_away_goals = None
+                    pts = 0
+                    cv = 0
+                else:
+                    prediction = pred["prediction"]
+                    predicted_home_goals = pred.get("predicted_home_goals")
+                    predicted_away_goals = pred.get("predicted_away_goals")
+                    pts = calculate_points(
+                        prediction, match,
+                        predicted_home_goals, predicted_away_goals,
+                        sign_pts, goal_diff_pts, exact_pts,
+                        adv_pts, ru_pts,
+                    )
+                    cv = correct_value(
+                        prediction, match,
+                        predicted_home_goals, predicted_away_goals,
+                        ru_pts,
+                    )
                 existing_pts = (
                     (db.query(sa_func.sum(NotifiedMatch.points)).filter_by(telegram_chat_id=user.telegram_chat_id).scalar() or 0)
                     + (db.query(sa_func.sum(GroupRankingAward.points)).filter_by(telegram_chat_id=user.telegram_chat_id).scalar() or 0)
@@ -140,21 +160,15 @@ async def _process_finished_matches():
 
                 text = build_message(
                     match=match,
-                    prediction=pred["prediction"],
-                    predicted_home_goals=pred.get("predicted_home_goals"),
-                    predicted_away_goals=pred.get("predicted_away_goals"),
+                    prediction=prediction,
+                    predicted_home_goals=predicted_home_goals,
+                    predicted_away_goals=predicted_away_goals,
                     points=pts,
                     total_points=existing_pts + pts,
                     points_runner_up=ru_pts,
                 )
                 sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
                 if sent:
-                    cv = correct_value(
-                        pred["prediction"], match,
-                        pred.get("predicted_home_goals"),
-                        pred.get("predicted_away_goals"),
-                        ru_pts,
-                    )
                     db.add(NotifiedMatch(
                         telegram_chat_id=user.telegram_chat_id,
                         api_match_id=match.id,
@@ -165,9 +179,9 @@ async def _process_finished_matches():
                         duration=match.duration,
                         winner=match.winner,
                         stage=match.stage,
-                        prediction=pred["prediction"],
-                        predicted_home_goals=pred.get("predicted_home_goals"),
-                        predicted_away_goals=pred.get("predicted_away_goals"),
+                        prediction=prediction,
+                        predicted_home_goals=predicted_home_goals,
+                        predicted_away_goals=predicted_away_goals,
                         correct=cv,
                         points=pts,
                     ))
