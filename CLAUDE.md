@@ -90,12 +90,26 @@ Scoring env vars follow the pattern `POINTS_{STAGE}_{TYPE}` where stage is `GROU
 
 ## Scoring logic
 
-Points are cumulative per match:
+Per match, points are the sum of two **independent** components (`points_breakdown` in `notifier.py`):
+
+**Score prediction** (all stages) — cumulative:
 - Correct sign (1X2) → `SIGN` points
 - Correct goal difference (sign must be correct) → `+GOAL_DIFF` points
 - Exact score → `+EXACT` points (in addition to the above)
 
-Default: 1 / 1 / 2 → max 4 pts per match. Each tournament stage can have independent values.
+Default: 1 / 1 / 2 → max 4 pts. Each tournament stage can have independent values.
+
+The score-prediction sign/diff/exact is judged on the result **before penalties**. For knockout
+predictions (`prediction` is a team name) the sign is derived from the predicted scoreline, not
+from the advancing team — so a correct scoreline scores even if the advancing-team pick is wrong.
+
+**Advancing team** (knockout only) — `+ADVANCEMENT` if the predicted team is the one that
+advanced (`match.winner`), or the Final's `+RUNNER_UP` bonus for predicting the losing finalist.
+
+Penalty-shootout handling lives in `football_api.get_matches`: `home_score`/`away_score` come from
+`regularTime + extraTime` (the pre-penalty score), and `winner` is derived from the combined
+`fullTime` when the API leaves it null. The stored `correct`/cv reflects scoreline accuracy only
+(0/1/2, plus 3 for the Final runner-up); the advancing-team point lives in `points`.
 
 ---
 

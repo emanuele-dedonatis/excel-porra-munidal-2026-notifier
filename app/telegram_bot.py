@@ -612,16 +612,17 @@ async def _handle_recheck(chat_id: str, bot_token: str, admin_chat_id: str, dry_
     mode_label = " (dry run — no changes will be made)" if dry_run else ""
     await send_message(bot_token, chat_id, f"⏳ Rechecking{mode_label}…")
 
-    if not dry_run:
-        matches_checked, corrections = await force_recheck_all()
-        if not corrections:
-            score_msg = f"✅ Match scores: {matches_checked} match(es) checked, all correct."
-        else:
-            lines = [f"🔄 Match scores: {matches_checked} match(es) checked\n"]
-            for match_label, old_score, new_score, user_count in corrections:
-                lines.append(f"✏️ <b>{match_label}</b>: {old_score} → {new_score}  ({user_count} user(s) corrected)")
-            score_msg = "\n".join(lines)
-        await send_message(bot_token, chat_id, score_msg)
+    matches_checked, corrections = await force_recheck_all(dry_run=dry_run)
+    verb = "would be corrected" if dry_run else "corrected"
+    if not corrections:
+        score_msg = f"✅ Match scores: {matches_checked} match(es) checked, all correct."
+    else:
+        header = "🔍 Match scores (dry run)" if dry_run else "🔄 Match scores"
+        lines = [f"{header}: {matches_checked} match(es) checked\n"]
+        for match_label, old_score, new_score, user_count in corrections:
+            lines.append(f"✏️ <b>{match_label}</b>: {old_score} → {new_score}  ({user_count} user(s) {verb})")
+        score_msg = "\n".join(lines)
+    await send_message(bot_token, chat_id, score_msg)
 
     r32_summary = await recalculate_r32_advancement(dry_run=dry_run)
     await send_message(bot_token, chat_id, f"🌍 <b>R32 bonus check</b>\n{r32_summary}")

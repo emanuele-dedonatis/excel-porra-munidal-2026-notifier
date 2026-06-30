@@ -48,6 +48,28 @@ async def get_matches(api_key: str, status: Optional[str] = None, stage: Optiona
 
         score = m.get("score", {})
         full_time = score.get("fullTime", {})
+        duration = score.get("duration")
+        winner = score.get("winner")
+        home_score = full_time.get("home")
+        away_score = full_time.get("away")
+
+        if duration == "PENALTY_SHOOTOUT":
+            # For a shootout, fullTime carries the regulation+penalties combined number.
+            # Points are scored on the result before penalties (end of extra time), so use
+            # regularTime + extraTime instead.
+            regular = score.get("regularTime", {}) or {}
+            extra = score.get("extraTime", {}) or {}
+            reg_home, reg_away = regular.get("home"), regular.get("away")
+            if reg_home is not None and reg_away is not None:
+                home_score = reg_home + (extra.get("home") or 0)
+                away_score = reg_away + (extra.get("away") or 0)
+            # The API sometimes leaves winner null while resolving; the combined fullTime
+            # still encodes who won the shootout, so derive it from there.
+            if winner is None and full_time.get("home") is not None and full_time.get("away") is not None:
+                if full_time["home"] > full_time["away"]:
+                    winner = "HOME_TEAM"
+                elif full_time["home"] < full_time["away"]:
+                    winner = "AWAY_TEAM"
 
         matches.append(APIMatch(
             id=m["id"],
@@ -55,10 +77,10 @@ async def get_matches(api_key: str, status: Optional[str] = None, stage: Optiona
             away_team=m["awayTeam"]["name"],
             kickoff_utc=kickoff_utc,
             status=m["status"],
-            home_score=full_time.get("home"),
-            away_score=full_time.get("away"),
-            winner=score.get("winner"),
-            duration=score.get("duration"),
+            home_score=home_score,
+            away_score=away_score,
+            winner=winner,
+            duration=duration,
             stage=m.get("stage", ""),
             matchday=m.get("matchday"),
         ))

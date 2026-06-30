@@ -153,6 +153,13 @@ Points are awarded per match and are configurable per tournament stage. The defa
 
 Points are **cumulative**: a correct sign earns 1 pt; same goal difference adds 1 more; exact score adds 2 more (total 4 pts).
 
+**Knockout matches** are scored as two independent components:
+
+- **Score prediction** — sign / goal difference / exact, judged on the result **before penalties** (end of regular + extra time). A shootout match counts as the draw it was at full time, e.g. a 1–1 decided on penalties is scored as 1–1.
+- **Advancing team** — a separate advancement bonus (see table below) for picking the team that goes through.
+
+The two are scored separately, so a correct scoreline still earns its points even if the predicted advancing team is wrong — which can only happen when a draw is decided on penalties.
+
 Each tournament stage can have independent values via env vars:
 
 ```
@@ -275,7 +282,19 @@ Possible verdicts:
 | Wrong prediction ❌ | None of the above |
 | No prediction ⚪ | You didn't predict this match |
 
-For knockout matches the points shown already include the advancement bonus stacked on top of sign/diff/exact:
+Knockout matches show the **score** and the **advancing team** on separate lines, each with its own points:
+
+```
+⚽ Match finished
+Germany 1–1 Paraguay (pens.)
+
+Your prediction: Paraguay (1–1)
+Score: 🎯 Exact score!  +4 pts
+Advancing team: ✅ Paraguay  +1 pts
++5 pts  (total: 27 pts)
+```
+
+The advancing-team bonus per stage:
 
 | Stage | Advancement bonus (if correct) |
 |-------|-------------------------------|

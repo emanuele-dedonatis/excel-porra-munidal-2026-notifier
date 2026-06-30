@@ -17,7 +17,7 @@ from .group_rankings import (
     simulate_predicted_standings,
 )
 from .models import GroupRankingAward, MatchRecheck, NotifiedMatch, User
-from .notifier import build_correction_message, build_message, calculate_points, correct_value, send_message
+from .notifier import build_correction_message, build_message, points_breakdown, send_message
 from .team_names import names_match
 
 logger = logging.getLogger(__name__)
@@ -135,23 +135,21 @@ async def _process_finished_matches():
                     prediction = None
                     predicted_home_goals = None
                     predicted_away_goals = None
+                    bd = None
                     pts = 0
                     cv = 0
                 else:
                     prediction = pred["prediction"]
                     predicted_home_goals = pred.get("predicted_home_goals")
                     predicted_away_goals = pred.get("predicted_away_goals")
-                    pts = calculate_points(
+                    bd = points_breakdown(
                         prediction, match,
                         predicted_home_goals, predicted_away_goals,
                         sign_pts, goal_diff_pts, exact_pts,
                         adv_pts, ru_pts,
                     )
-                    cv = correct_value(
-                        prediction, match,
-                        predicted_home_goals, predicted_away_goals,
-                        ru_pts,
-                    )
+                    pts = bd.total
+                    cv = bd.score_cv if bd.score_cv else (3 if bd.runner_up else 0)
                 existing_pts = (
                     (db.query(sa_func.sum(NotifiedMatch.points)).filter_by(telegram_chat_id=user.telegram_chat_id).scalar() or 0)
                     + (db.query(sa_func.sum(GroupRankingAward.points)).filter_by(telegram_chat_id=user.telegram_chat_id).scalar() or 0)
@@ -163,9 +161,8 @@ async def _process_finished_matches():
                     prediction=prediction,
                     predicted_home_goals=predicted_home_goals,
                     predicted_away_goals=predicted_away_goals,
-                    points=pts,
+                    breakdown=bd,
                     total_points=existing_pts + pts,
-                    points_runner_up=ru_pts,
                 )
                 sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
                 if sent:
@@ -201,28 +198,35 @@ async def _process_finished_matches():
         db.close()
 
 
-async def _correct_match_scores(db: Session, match: APIMatch, settings) -> int:
-    """Send correction messages to users whose stored score for match differs from the API score.
-    Updates NotifiedMatch records in-place. Caller must commit. Returns count of corrected users."""
+async def _correct_match_scores(db: Session, match: APIMatch, settings, dry_run: bool = False) -> int:
+    """Send correction messages to users whose stored score or points for match differ from the
+    recomputed values. Updates NotifiedMatch records in-place (caller must commit). Returns the
+    count of affected users. With dry_run=True nothing is sent or modified — it only counts the
+    rows that would change."""
     notified_rows = db.query(NotifiedMatch).filter_by(api_match_id=match.id).all()
+    sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
+    adv_pts = settings.stage_advancement_points(match.stage)
+    ru_pts = settings.stage_runner_up_points(match.stage)
     corrected = 0
     for nm in notified_rows:
-        if nm.home_score == match.home_score and nm.away_score == match.away_score:
-            continue
         if nm.prediction is None:
             continue
-        old_home = nm.home_score or 0
-        old_away = nm.away_score or 0
-        sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
-        adv_pts = settings.stage_advancement_points(match.stage)
-        ru_pts = settings.stage_runner_up_points(match.stage)
-        new_pts = calculate_points(
+        bd = points_breakdown(
             nm.prediction, match,
             nm.predicted_home_goals, nm.predicted_away_goals,
             sign_pts, goal_diff_pts, exact_pts,
             adv_pts, ru_pts,
         )
-        new_cv = correct_value(nm.prediction, match, nm.predicted_home_goals, nm.predicted_away_goals, ru_pts)
+        new_pts = bd.total
+        new_cv = bd.score_cv if bd.score_cv else (3 if bd.runner_up else 0)
+        score_same = nm.home_score == match.home_score and nm.away_score == match.away_score
+        if score_same and (nm.points or 0) == new_pts and (nm.correct or 0) == new_cv:
+            continue
+        old_home = nm.home_score or 0
+        old_away = nm.away_score or 0
+        if dry_run:
+            corrected += 1
+            continue
         current_total = (
             (db.query(sa_func.sum(NotifiedMatch.points)).filter_by(telegram_chat_id=nm.telegram_chat_id).scalar() or 0)
             + (db.query(sa_func.sum(GroupRankingAward.points)).filter_by(telegram_chat_id=nm.telegram_chat_id).scalar() or 0)
@@ -236,8 +240,8 @@ async def _correct_match_scores(db: Session, match: APIMatch, settings) -> int:
             prediction=nm.prediction,
             predicted_home_goals=nm.predicted_home_goals,
             predicted_away_goals=nm.predicted_away_goals,
+            breakdown=bd,
             old_points=nm.points or 0,
-            new_points=new_pts,
             total_points=updated_total,
             points_runner_up=ru_pts,
         )
@@ -302,11 +306,12 @@ async def _recheck_scores():
         db.close()
 
 
-async def force_recheck_all() -> tuple[int, list[tuple[str, str, str, int]]]:
-    """Re-check scores for all matches that have NotifiedMatch records.
+async def force_recheck_all(dry_run: bool = False) -> tuple[int, list[tuple[str, str, str, int]]]:
+    """Re-check scores AND points for all matches that have NotifiedMatch records.
     Sends correction messages to affected users and updates their records.
     Returns (matches_checked, corrections) where each correction is
-    (match_label, old_score, new_score, users_corrected)."""
+    (match_label, old_score, new_score, users_corrected).
+    With dry_run=True nothing is sent or modified — it only reports what would change."""
     settings = get_settings()
     db: Session = SessionLocal()
     try:
@@ -335,30 +340,31 @@ async def force_recheck_all() -> tuple[int, list[tuple[str, str, str, int]]]:
 
             matches_checked += 1
 
-            stale = db.query(NotifiedMatch).filter(
-                NotifiedMatch.api_match_id == api_match_id,
-                (NotifiedMatch.home_score != match.home_score) | (NotifiedMatch.away_score != match.away_score),
-            ).first()
-
-            if stale:
-                old_score = f"{stale.home_score}–{stale.away_score}"
+            corrected = await _correct_match_scores(db, match, settings, dry_run=dry_run)
+            if corrected:
+                # Representative stored score for the summary (prefer a row whose score is stale).
+                rep = db.query(NotifiedMatch).filter(
+                    NotifiedMatch.api_match_id == api_match_id,
+                    (NotifiedMatch.home_score != match.home_score) | (NotifiedMatch.away_score != match.away_score),
+                ).first() or db.query(NotifiedMatch).filter_by(api_match_id=api_match_id).first()
+                old_score = f"{rep.home_score}–{rep.away_score}" if rep else "?"
                 new_score = f"{match.home_score}–{match.away_score}"
-                corrected = await _correct_match_scores(db, match, settings)
-                if corrected:
-                    corrections.append((
-                        f"{match.home_team} vs {match.away_team}",
-                        old_score, new_score, corrected,
-                    ))
-                    logger.info(
-                        f"Force recheck: corrected {corrected} users for "
-                        f"{match.home_team} vs {match.away_team} ({old_score} → {new_score})"
-                    )
+                corrections.append((
+                    f"{match.home_team} vs {match.away_team}",
+                    old_score, new_score, corrected,
+                ))
+                logger.info(
+                    f"Force recheck{' (dry run)' if dry_run else ''}: "
+                    f"{corrected} users for {match.home_team} vs {match.away_team} ({old_score} → {new_score})"
+                )
 
-            recheck = db.get(MatchRecheck, api_match_id)
-            if recheck and not recheck.done:
-                recheck.done = True
+            if not dry_run:
+                recheck = db.get(MatchRecheck, api_match_id)
+                if recheck and not recheck.done:
+                    recheck.done = True
 
-        db.commit()
+        if not dry_run:
+            db.commit()
         return matches_checked, corrections
     finally:
         db.close()
@@ -715,13 +721,12 @@ async def seed_past_matches(telegram_chat_id: str):
             if pred:
                 adv_pts = settings.stage_advancement_points(match.stage)
                 ru_pts = settings.stage_runner_up_points(match.stage)
-                cv = correct_value(pred["prediction"], match, pred.get("predicted_home_goals"), pred.get("predicted_away_goals"), ru_pts)
-                pts = calculate_points(pred["prediction"], match, pred.get("predicted_home_goals"), pred.get("predicted_away_goals"), sign_pts, goal_diff_pts, exact_pts, adv_pts, ru_pts)
+                bd = points_breakdown(pred["prediction"], match, pred.get("predicted_home_goals"), pred.get("predicted_away_goals"), sign_pts, goal_diff_pts, exact_pts, adv_pts, ru_pts)
                 entry.prediction = pred["prediction"]
                 entry.predicted_home_goals = pred.get("predicted_home_goals")
                 entry.predicted_away_goals = pred.get("predicted_away_goals")
-                entry.correct = cv
-                entry.points = pts
+                entry.correct = bd.score_cv if bd.score_cv else (3 if bd.runner_up else 0)
+                entry.points = bd.total
             db.add(entry)
         db.commit()
     finally:
