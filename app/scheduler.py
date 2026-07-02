@@ -14,10 +14,11 @@ from .group_rankings import (
     build_group_ranking_message,
     compute_r32_advancement_points,
     compute_ranking_points,
+    predicted_r32_bracket,
     simulate_predicted_standings,
 )
 from .models import GroupRankingAward, MatchRecheck, NotifiedMatch, User
-from .notifier import build_correction_message, build_message, points_breakdown, send_message
+from .notifier import build_correction_message, build_message, points_breakdown, send_message, send_message_ex
 from .team_names import names_match
 
 logger = logging.getLogger(__name__)
@@ -122,34 +123,38 @@ async def _process_finished_matches():
 
                 sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
                 adv_pts = settings.stage_advancement_points(match.stage)
+                loser_adv_pts = settings.stage_loser_advancement_points(match.stage)
                 ru_pts = settings.stage_runner_up_points(match.stage)
                 if pred is None:
-                    # User didn't predict this match — notify with 0 pts, but only for
-                    # recently finished matches to avoid back-filling the whole tournament.
+                    prediction = None
+                    predicted_home_goals = None
+                    predicted_away_goals = None
+                else:
+                    prediction = pred["prediction"]
+                    predicted_home_goals = pred.get("predicted_home_goals")
+                    predicted_away_goals = pred.get("predicted_away_goals")
+                bd = points_breakdown(
+                    prediction, match,
+                    predicted_home_goals, predicted_away_goals,
+                    sign_pts, goal_diff_pts, exact_pts,
+                    adv_pts, ru_pts,
+                    user_predictions=user.predictions,
+                    points_loser_advancement=loser_adv_pts,
+                )
+                pts = bd.total
+                cv = bd.score_cv if bd.score_cv else (3 if bd.runner_up else 0)
+                if pred is None and pts == 0:
+                    # User didn't predict this match-up and earns nothing — notify with
+                    # 0 pts, but only for recently finished matches to avoid back-filling
+                    # the whole tournament. (Advancement points are always recorded: a
+                    # divergent bracket can still earn the advancing-team bonus.)
                     max_age = settings.no_prediction_max_age_hours
                     if max_age <= 0:
                         continue
                     age = datetime.now(timezone.utc) - match.kickoff_utc
                     if age > timedelta(hours=max_age):
                         continue
-                    prediction = None
-                    predicted_home_goals = None
-                    predicted_away_goals = None
                     bd = None
-                    pts = 0
-                    cv = 0
-                else:
-                    prediction = pred["prediction"]
-                    predicted_home_goals = pred.get("predicted_home_goals")
-                    predicted_away_goals = pred.get("predicted_away_goals")
-                    bd = points_breakdown(
-                        prediction, match,
-                        predicted_home_goals, predicted_away_goals,
-                        sign_pts, goal_diff_pts, exact_pts,
-                        adv_pts, ru_pts,
-                    )
-                    pts = bd.total
-                    cv = bd.score_cv if bd.score_cv else (3 if bd.runner_up else 0)
                 existing_pts = (
                     (db.query(sa_func.sum(NotifiedMatch.points)).filter_by(telegram_chat_id=user.telegram_chat_id).scalar() or 0)
                     + (db.query(sa_func.sum(GroupRankingAward.points)).filter_by(telegram_chat_id=user.telegram_chat_id).scalar() or 0)
@@ -164,8 +169,10 @@ async def _process_finished_matches():
                     breakdown=bd,
                     total_points=existing_pts + pts,
                 )
-                sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
-                if sent:
+                sent, permanent_fail = await send_message_ex(settings.telegram_bot_token, user.telegram_chat_id, text)
+                if sent or permanent_fail:
+                    # A 4xx from Telegram (chat not found / bot blocked) will never succeed
+                    # on retry — record the match anyway so the user's points stay correct.
                     db.add(NotifiedMatch(
                         telegram_chat_id=user.telegram_chat_id,
                         api_match_id=match.id,
@@ -199,40 +206,66 @@ async def _process_finished_matches():
 
 
 async def _correct_match_scores(db: Session, match: APIMatch, settings, dry_run: bool = False) -> int:
-    """Send correction messages to users whose stored score or points for match differ from the
-    recomputed values. Updates NotifiedMatch records in-place (caller must commit). Returns the
-    count of affected users. With dry_run=True nothing is sent or modified — it only counts the
-    rows that would change."""
+    """Bring all stored records for a match in line with the recomputed result and points,
+    and send correction messages to users whose points changed. Also refreshes rows without
+    a prediction (their stored result/winner can be stale, and a divergent bracket can still
+    earn advancement points). Updates NotifiedMatch records in-place (caller must commit).
+    Returns the count of affected users. With dry_run=True nothing is sent or modified —
+    it only counts the rows that would change."""
     notified_rows = db.query(NotifiedMatch).filter_by(api_match_id=match.id).all()
+    users_by_chat = {
+        u.telegram_chat_id: u
+        for u in db.query(User).filter(
+            User.telegram_chat_id.in_([nm.telegram_chat_id for nm in notified_rows])
+        ).all()
+    }
     sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
     adv_pts = settings.stage_advancement_points(match.stage)
+    loser_adv_pts = settings.stage_loser_advancement_points(match.stage)
     ru_pts = settings.stage_runner_up_points(match.stage)
     corrected = 0
     for nm in notified_rows:
-        if nm.prediction is None:
-            continue
+        user = users_by_chat.get(nm.telegram_chat_id)
         bd = points_breakdown(
             nm.prediction, match,
             nm.predicted_home_goals, nm.predicted_away_goals,
             sign_pts, goal_diff_pts, exact_pts,
             adv_pts, ru_pts,
+            user_predictions=user.predictions if user else None,
+            points_loser_advancement=loser_adv_pts,
         )
         new_pts = bd.total
         new_cv = bd.score_cv if bd.score_cv else (3 if bd.runner_up else 0)
-        score_same = nm.home_score == match.home_score and nm.away_score == match.away_score
-        if score_same and (nm.points or 0) == new_pts and (nm.correct or 0) == new_cv:
+        result_same = (
+            nm.home_score == match.home_score and nm.away_score == match.away_score
+            and (nm.duration or "REGULAR") == (match.duration or "REGULAR")
+            and nm.winner == match.winner
+        )
+        points_same = (nm.points or 0) == new_pts and (nm.correct or 0) == new_cv
+        if result_same and points_same:
             continue
         old_home = nm.home_score or 0
         old_away = nm.away_score or 0
+        old_pts = nm.points or 0
         if dry_run:
             corrected += 1
+            continue
+        nm.home_score = match.home_score
+        nm.away_score = match.away_score
+        nm.duration = match.duration
+        nm.winner = match.winner
+        nm.correct = new_cv
+        nm.points = new_pts
+        corrected += 1
+        if points_same and nm.prediction is None:
+            # Silent metadata refresh — no points involved, no message needed.
             continue
         current_total = (
             (db.query(sa_func.sum(NotifiedMatch.points)).filter_by(telegram_chat_id=nm.telegram_chat_id).scalar() or 0)
             + (db.query(sa_func.sum(GroupRankingAward.points)).filter_by(telegram_chat_id=nm.telegram_chat_id).scalar() or 0)
             + (db.query(sa_func.sum(GroupRankingAward.advancement_points)).filter_by(telegram_chat_id=nm.telegram_chat_id).scalar() or 0)
         )
-        updated_total = current_total - (nm.points or 0) + new_pts
+        updated_total = current_total - old_pts + new_pts
         text = build_correction_message(
             match=match,
             old_home=old_home,
@@ -241,17 +274,11 @@ async def _correct_match_scores(db: Session, match: APIMatch, settings, dry_run:
             predicted_home_goals=nm.predicted_home_goals,
             predicted_away_goals=nm.predicted_away_goals,
             breakdown=bd,
-            old_points=nm.points or 0,
+            old_points=old_pts,
             total_points=updated_total,
             points_runner_up=ru_pts,
         )
-        sent = await send_message(settings.telegram_bot_token, nm.telegram_chat_id, text)
-        if sent:
-            nm.home_score = match.home_score
-            nm.away_score = match.away_score
-            nm.correct = new_cv
-            nm.points = new_pts
-            corrected += 1
+        await send_message(settings.telegram_bot_token, nm.telegram_chat_id, text)
     return corrected
 
 
@@ -373,34 +400,28 @@ async def force_recheck_all(dry_run: bool = False) -> tuple[int, list[tuple[str,
 def _build_r32_bonus_lines(
     awards: list,
     r32_teams: set[str],
-) -> tuple[list[str], list[str], int]:
-    """Build group and 3rd-place display lines and compute total advancement pts."""
+    bracket_teams_es: list[str],
+) -> tuple[list[str], int]:
+    """Build per-group display lines and compute the total R32 qualification bonus.
+    Each group's actual qualifiers earn +1 when they appear anywhere in the user's
+    predicted R32 bracket (the Excel's matchup-independent rule)."""
     group_lines: list[str] = []
-    third_place_lines: list[str] = []
     total_adv_pts = 0
 
     for award in sorted(awards, key=lambda a: a.group_name):
-        pred_pos = award.pred_pos or []
-        actual_pos = award.actual_pos or []
-        adv = compute_r32_advancement_points(pred_pos, r32_teams)
+        group_teams = award.actual_pos or []
+        adv = compute_r32_advancement_points(group_teams, bracket_teams_es, r32_teams)
         total_adv_pts += adv
 
-        pred1 = pred_pos[0] if len(pred_pos) > 0 else "?"
-        pred2 = pred_pos[1] if len(pred_pos) > 1 else "?"
-        mark1 = "✅" if pred1 in r32_teams else "❌"
-        mark2 = "✅" if pred2 in r32_teams else "❌"
-        group_lines.append(f"{award.group_name}:  {mark1} {pred1}  {mark2} {pred2}  +{adv}")
+        marks = []
+        for team in group_teams:
+            if team not in r32_teams:
+                continue
+            in_bracket = any(names_match(t, team) for t in bracket_teams_es)
+            marks.append(f"{'✅' if in_bracket else '❌'} {team}")
+        group_lines.append(f"{award.group_name}:  " + "  ".join(marks) + f"  +{adv}")
 
-        actual_3rd = actual_pos[2] if len(actual_pos) > 2 else None
-        if actual_3rd and actual_3rd in r32_teams:
-            pred3 = pred_pos[2] if len(pred_pos) > 2 else "?"
-            mark3 = "✅" if pred3 in r32_teams else "❌"
-            if pred3 == actual_3rd:
-                third_place_lines.append(f"{award.group_name}: {mark3} {pred3}")
-            else:
-                third_place_lines.append(f"{award.group_name}: {mark3} {pred3}  (actual: {actual_3rd})")
-
-    return group_lines, third_place_lines, total_adv_pts
+    return group_lines, total_adv_pts
 
 
 async def recalculate_r32_advancement(dry_run: bool = False) -> str:
@@ -440,7 +461,8 @@ async def recalculate_r32_advancement(dry_run: bool = False) -> str:
                 continue
 
             old_adv = sum(a.advancement_points or 0 for a in awards)
-            group_lines, third_place_lines, new_adv = _build_r32_bonus_lines(awards, r32_teams)
+            bracket = predicted_r32_bracket(user.predictions)
+            group_lines, new_adv = _build_r32_bonus_lines(awards, r32_teams, bracket)
 
             if old_adv != new_adv:
                 changed_count += 1
@@ -456,8 +478,6 @@ async def recalculate_r32_advancement(dry_run: bool = False) -> str:
                 total_pts = match_pts + pos_pts + new_adv
 
                 body = "\n".join(group_lines)
-                if third_place_lines:
-                    body += "\n\n<b>Best 3rd places:</b>\n" + "\n".join(third_place_lines)
                 pts_change = f"{old_adv} → {new_adv}" if old_adv != new_adv else str(new_adv)
                 preview_text = (
                     f"🔍 <b>[Preview for {user.name}] R32 Qualification Bonuses</b>\n\n"
@@ -503,21 +523,50 @@ async def _check_group_rankings():
     db: Session = SessionLocal()
     try:
         users: list[User] = db.query(User).all()
+
+        # Which groups still need an award for at least one user? (Checked before the
+        # extra fixtures call below so the steady state costs no additional API request.)
+        pending_users: dict[str, list[User]] = {}
         for group in complete_groups:
-            group_name = group["group"]
-            actual_pos = group["teams"]  # ordered 1→4 by API
-
             for user in users:
-                already = db.query(GroupRankingAward).filter_by(
-                    telegram_chat_id=user.telegram_chat_id,
-                    group_name=group_name,
-                ).first()
-                if already:
-                    continue
-
                 if not user.predictions:
                     continue
+                already = db.query(GroupRankingAward).filter_by(
+                    telegram_chat_id=user.telegram_chat_id,
+                    group_name=group["group"],
+                ).first()
+                if not already:
+                    pending_users.setdefault(group["group"], []).append(user)
+        if not pending_users:
+            return
 
+        # The standings API counts in-play games as played, so a group can look complete
+        # while its last match is still on the pitch (and its table order still in flux).
+        # Only trust a group whose 6 fixtures are actually FINISHED.
+        try:
+            finished_group_matches = await get_matches(
+                settings.football_data_api_key, status="FINISHED", stage="GROUP_STAGE",
+            )
+        except Exception as e:
+            logger.error(f"Failed to fetch finished group matches for ranking check: {e}")
+            return
+
+        for group in complete_groups:
+            group_name = group["group"]
+            if group_name not in pending_users:
+                continue
+            actual_pos = group["teams"]  # ordered 1→4 by API
+            group_teams = set(actual_pos)
+            finished_count = sum(
+                1 for m in finished_group_matches
+                if m.home_team in group_teams and m.away_team in group_teams
+            )
+            if finished_count < 6:
+                logger.info(f"{group_name} looks complete in standings but only "
+                            f"{finished_count}/6 matches are FINISHED — waiting")
+                continue
+
+            for user in pending_users[group_name]:
                 predicted_pos = simulate_predicted_standings(user.predictions, actual_pos)
                 if predicted_pos is None:
                     logger.warning(
@@ -542,8 +591,8 @@ async def _check_group_rankings():
                 total_pts = match_pts + ranking_pts + adv_pts_existing + pts
 
                 text = build_group_ranking_message(group_name, predicted_pos, actual_pos, pts, total_pts)
-                sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
-                if sent:
+                sent, permanent_fail = await send_message_ex(settings.telegram_bot_token, user.telegram_chat_id, text)
+                if sent or permanent_fail:
                     db.add(GroupRankingAward(
                         telegram_chat_id=user.telegram_chat_id,
                         group_name=group_name,
@@ -598,11 +647,14 @@ async def _check_r32_advancement(is_correction: bool = False):
             if not pending_awards:
                 continue
 
-            group_lines, third_place_lines, total_adv_pts = _build_r32_bonus_lines(pending_awards, r32_teams)
+            bracket = predicted_r32_bracket(user.predictions)
+            group_lines, total_adv_pts = _build_r32_bonus_lines(pending_awards, r32_teams, bracket)
 
             # Persist the computed advancement_points
             for award in pending_awards:
-                award.advancement_points = compute_r32_advancement_points(award.pred_pos or [], r32_teams)
+                award.advancement_points = compute_r32_advancement_points(
+                    award.actual_pos or [], bracket, r32_teams,
+                )
 
             match_pts = db.query(sa_func.sum(NotifiedMatch.points)).filter_by(
                 telegram_chat_id=user.telegram_chat_id,
@@ -614,12 +666,10 @@ async def _check_r32_advancement(is_correction: bool = False):
 
             header = "🌍 <b>R32 Qualification Bonuses (corrected)</b>" if is_correction else "🌍 <b>R32 Qualification Bonuses</b>"
             body = "\n".join(group_lines)
-            if third_place_lines:
-                body += "\n\n<b>Best 3rd places:</b>\n" + "\n".join(third_place_lines)
             text = f"{header}\n\n{body}\n\n<b>+{total_adv_pts} pts</b>  (total: {total_pts} pts)"
 
-            sent = await send_message(settings.telegram_bot_token, user.telegram_chat_id, text)
-            if sent:
+            sent, permanent_fail = await send_message_ex(settings.telegram_bot_token, user.telegram_chat_id, text)
+            if sent or permanent_fail:
                 db.commit()
                 logger.info(f"R32 advancement notified: {user.name} → +{total_adv_pts} pts")
     finally:
@@ -707,6 +757,9 @@ async def seed_past_matches(telegram_chat_id: str):
                 continue
             pred = _find_prediction(user, match) if user else None
             sign_pts, goal_diff_pts, exact_pts = settings.stage_points(match.stage)
+            adv_pts = settings.stage_advancement_points(match.stage)
+            loser_adv_pts = settings.stage_loser_advancement_points(match.stage)
+            ru_pts = settings.stage_runner_up_points(match.stage)
             entry = NotifiedMatch(
                 telegram_chat_id=telegram_chat_id,
                 api_match_id=match.id,
@@ -718,15 +771,20 @@ async def seed_past_matches(telegram_chat_id: str):
                 winner=match.winner,
                 stage=match.stage,
             )
+            bd = points_breakdown(
+                pred["prediction"] if pred else None, match,
+                pred.get("predicted_home_goals") if pred else None,
+                pred.get("predicted_away_goals") if pred else None,
+                sign_pts, goal_diff_pts, exact_pts, adv_pts, ru_pts,
+                user_predictions=user.predictions if user else None,
+                points_loser_advancement=loser_adv_pts,
+            )
             if pred:
-                adv_pts = settings.stage_advancement_points(match.stage)
-                ru_pts = settings.stage_runner_up_points(match.stage)
-                bd = points_breakdown(pred["prediction"], match, pred.get("predicted_home_goals"), pred.get("predicted_away_goals"), sign_pts, goal_diff_pts, exact_pts, adv_pts, ru_pts)
                 entry.prediction = pred["prediction"]
                 entry.predicted_home_goals = pred.get("predicted_home_goals")
                 entry.predicted_away_goals = pred.get("predicted_away_goals")
-                entry.correct = bd.score_cv if bd.score_cv else (3 if bd.runner_up else 0)
-                entry.points = bd.total
+            entry.correct = bd.score_cv if bd.score_cv else (3 if bd.runner_up else 0)
+            entry.points = bd.total
             db.add(entry)
         db.commit()
     finally:

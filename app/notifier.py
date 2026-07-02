@@ -11,10 +11,63 @@ logger = logging.getLogger(__name__)
 
 _TELEGRAM_URL = "https://api.telegram.org/bot{token}/sendMessage"
 
+# Round label used in the Excel template for each API knockout stage
+STAGE_ROUND_LABEL = {
+    "LAST_32": "1/32",
+    "LAST_16": "1/16",
+    "QUARTER_FINALS": "1/4",
+    "SEMI_FINALS": "1/2",
+    "THIRD_PLACE": "3/4",
+    "FINAL": "Final",
+}
+
 
 def is_knockout_prediction(prediction: Optional[str]) -> bool:
     """A knockout prediction is a team name (not a group-stage 1X2 outcome or empty)."""
     return prediction is not None and prediction not in ("home", "away", "draw")
+
+
+def winner_loser_teams(match: APIMatch) -> tuple[Optional[str], Optional[str]]:
+    """(advancing team, eliminated team) in English, or (None, None) if undecided."""
+    if match.winner == "HOME_TEAM":
+        return match.home_team, match.away_team
+    if match.winner == "AWAY_TEAM":
+        return match.away_team, match.home_team
+    return None, None
+
+
+def _round_predictions(predictions: Optional[dict], label: str) -> list[dict]:
+    return [p for p in (predictions or {}).values() if str(p.get("round_label", "")) == label]
+
+
+def predicted_round_winner(predictions: Optional[dict], label: str, team_en: str) -> bool:
+    """True if the user picked team_en to win one of their matches in this round."""
+    for p in _round_predictions(predictions, label):
+        pick = p.get("prediction")
+        if is_knockout_prediction(pick) and names_match(pick, team_en):
+            return True
+    return False
+
+
+def predicted_round_participant(predictions: Optional[dict], label: str, team_en: str) -> bool:
+    """True if team_en appears (home or away) in the user's predicted bracket for this round."""
+    for p in _round_predictions(predictions, label):
+        if names_match(p.get("home_team", ""), team_en) or names_match(p.get("away_team", ""), team_en):
+            return True
+    return False
+
+
+def predicted_final_runner_up(predictions: Optional[dict], team_en: str) -> bool:
+    """True if the user's predicted Final loser (the finalist they did NOT pick) is team_en."""
+    for p in _round_predictions(predictions, "Final"):
+        pick = p.get("prediction")
+        if not is_knockout_prediction(pick):
+            continue
+        home, away = p.get("home_team", ""), p.get("away_team", "")
+        predicted_loser = away if names_match(pick, home) else home
+        if names_match(predicted_loser, team_en):
+            return True
+    return False
 
 
 def _actual_sign(match: APIMatch) -> Optional[str]:
@@ -41,28 +94,6 @@ def _predicted_sign(prediction: str, pred_home: Optional[int], pred_away: Option
     if pred_home < pred_away:
         return "away"
     return "draw"
-
-
-def is_runner_up(prediction: str, match: APIMatch) -> bool:
-    """Return True if prediction matches the LOSER of a knockout match."""
-    if match.winner == "HOME_TEAM":
-        loser_en = match.away_team
-    elif match.winner == "AWAY_TEAM":
-        loser_en = match.home_team
-    else:
-        return False
-    return names_match(prediction, loser_en)
-
-
-def advancement_earned(prediction: str, match: APIMatch) -> bool:
-    """Return True if a knockout prediction (team name) matches the team that advanced."""
-    if match.winner == "HOME_TEAM":
-        winner_en = match.home_team
-    elif match.winner == "AWAY_TEAM":
-        winner_en = match.away_team
-    else:
-        return False
-    return names_match(prediction, winner_en)
 
 
 def is_exact_score(pred_home: Optional[int], pred_away: Optional[int], match: APIMatch) -> bool:
@@ -94,11 +125,26 @@ def points_breakdown(
     points_exact: int,
     points_advancement: int = 0,
     points_runner_up: int = 0,
+    user_predictions: Optional[dict] = None,
+    points_loser_advancement: int = 0,
 ) -> PointsBreakdown:
-    """Split a prediction's points into the scoreline component (all stages) and the
-    advancing-team component (knockout only). The two are scored independently, so a correct
-    scoreline still earns points even when the advancing-team pick is wrong (e.g. a draw
-    decided on penalties)."""
+    """Split a prediction's points into the scoreline component and the advancing-team
+    component (knockout only). The two are scored independently.
+
+    Scoreline points need the user's predicted pairing to match the real fixture
+    (prediction / predicted goals are for the matched fixture, or None).
+
+    Advancement points follow the Excel template's "Equipo clasificado" rules and are
+    matchup-independent: the advancing team earns the bonus if the user predicted it to
+    reach the next round anywhere in their bracket (user_predictions), even when their
+    predicted pairing for this fixture was different or missing.
+      - R32/R16/QF/3rd place: +advancement if the winner is one of the user's picks for
+        this round.
+      - Semi-finals: +advancement if the winner is in the user's predicted Final,
+        +loser_advancement if the loser is in the user's predicted 3rd-place match.
+      - Final: +advancement (champion bonus) if the winner is the user's predicted
+        champion; +runner_up if the loser is the user's predicted losing finalist.
+        The two are independent (an exact predicted final earns both)."""
     # Scoreline component
     score_points = 0
     score_cv = 0
@@ -115,57 +161,34 @@ def points_breakdown(
                     score_points += points_exact
                     score_cv = 2
 
-    # Advancing-team component (knockout only)
+    # Advancing-team component (knockout only, matchup-independent)
     advancement_points = 0
     advanced = False
     runner_up = False
-    if is_knockout_prediction(prediction):
-        if advancement_earned(prediction, match):
-            advanced = True
-            advancement_points = points_advancement
-        elif points_runner_up > 0 and is_runner_up(prediction, match):
-            runner_up = True
-            advancement_points = points_runner_up
+    label = STAGE_ROUND_LABEL.get(match.stage or "")
+    if label and user_predictions:
+        winner_en, loser_en = winner_loser_teams(match)
+        if winner_en:
+            if match.stage == "FINAL":
+                if predicted_round_winner(user_predictions, "Final", winner_en):
+                    advanced = True
+                    advancement_points += points_advancement
+                if points_runner_up > 0 and predicted_final_runner_up(user_predictions, loser_en):
+                    runner_up = True
+                    advancement_points += points_runner_up
+            elif match.stage == "SEMI_FINALS":
+                if predicted_round_participant(user_predictions, "Final", winner_en):
+                    advanced = True
+                    advancement_points += points_advancement
+                if points_loser_advancement > 0 and predicted_round_participant(user_predictions, "3/4", loser_en):
+                    advanced = True
+                    advancement_points += points_loser_advancement
+            else:
+                if predicted_round_winner(user_predictions, label, winner_en):
+                    advanced = True
+                    advancement_points += points_advancement
 
     return PointsBreakdown(score_points, advancement_points, score_cv, advanced, runner_up)
-
-
-def calculate_points(
-    prediction: str,
-    match: APIMatch,
-    predicted_home_goals: Optional[int],
-    predicted_away_goals: Optional[int],
-    points_sign: int,
-    points_goal_diff: int,
-    points_exact: int,
-    points_advancement: int = 0,
-    points_runner_up: int = 0,
-) -> int:
-    """Total points earned for this match prediction."""
-    return points_breakdown(
-        prediction, match, predicted_home_goals, predicted_away_goals,
-        points_sign, points_goal_diff, points_exact, points_advancement, points_runner_up,
-    ).total
-
-
-def correct_value(
-    prediction: str,
-    match: APIMatch,
-    predicted_home_goals: Optional[int],
-    predicted_away_goals: Optional[int],
-    points_runner_up: int = 0,
-) -> int:
-    """Stored `correct` value: 2 = exact score, 1 = correct result, 3 = runner-up bonus, 0 = wrong.
-    Reflects scoreline accuracy (the advancing-team point is tracked separately in `points`)."""
-    bd = points_breakdown(
-        prediction, match, predicted_home_goals, predicted_away_goals,
-        1, 1, 1, 0, points_runner_up,
-    )
-    if bd.score_cv:
-        return bd.score_cv
-    if bd.runner_up:
-        return 3
-    return 0
 
 
 def _result_line(match: APIMatch) -> str:
@@ -185,7 +208,7 @@ def _score_verdict(bd: PointsBreakdown) -> str:
 
 def _advancing_verdict(prediction: str, bd: PointsBreakdown) -> str:
     if bd.advanced:
-        return f"✅ {prediction}  <b>+{bd.advancement_points} pts</b>"
+        return f"🎫 {prediction}  <b>+{bd.advancement_points} pts</b>"
     if bd.runner_up:
         return f"🥈 {prediction} (runner-up)  <b>+{bd.advancement_points} pts</b>"
     return f"❌ {prediction}  +0 pts"
@@ -223,6 +246,15 @@ def build_message(
     result_line = _result_line(match)
 
     if prediction is None:
+        if breakdown is not None and breakdown.advancement_points > 0:
+            winner_en, _ = winner_loser_teams(match)
+            return (
+                f"⚽ <b>Match finished</b>\n"
+                f"<b>{result_line}</b>\n\n"
+                f"Match not predicted  +0 pts\n"
+                f"Advancement prediction: 🎫 <b>{winner_en}</b>  <b>+{breakdown.advancement_points} pts</b>\n"
+                f"<b>+{breakdown.advancement_points} pts</b>  (total: {total_points} pts)"
+            )
         return (
             f"⚽ <b>Match finished</b>\n"
             f"<b>{result_line}</b>\n\n"
@@ -262,7 +294,7 @@ def build_correction_message(
     match: APIMatch,
     old_home: int,
     old_away: int,
-    prediction: str,
+    prediction: Optional[str],
     predicted_home_goals: Optional[int],
     predicted_away_goals: Optional[int],
     breakdown: PointsBreakdown,
@@ -274,6 +306,20 @@ def build_correction_message(
     result_line = _result_line(match)
     new_points = bd.total
     pts_change = f"{old_points} → {new_points}" if old_points != new_points else str(new_points)
+
+    if prediction is None:
+        winner_en, _ = winner_loser_teams(match)
+        if bd.advancement_points > 0:
+            detail = (f"Match not predicted  +0 pts\n"
+                      f"Advancement prediction: 🎫 <b>{winner_en}</b>  <b>+{bd.advancement_points} pts</b>")
+        else:
+            detail = "Match not predicted."
+        return (
+            f"⚠️ <b>Score correction</b>\n"
+            f"<b>{result_line}</b> (was {old_home}–{old_away})\n\n"
+            f"{detail}\n"
+            f"<b>+{new_points} pts</b>  (pts: {pts_change}, total: {total_points} pts)"
+        )
 
     if is_knockout_prediction(prediction):
         return (
@@ -301,12 +347,28 @@ def build_correction_message(
     )
 
 
-async def send_message(bot_token: str, chat_id: str, text: str) -> bool:
+async def send_message_ex(bot_token: str, chat_id: str, text: str) -> tuple[bool, bool]:
+    """Send a message and return (sent, permanent_failure).
+
+    permanent_failure is True on a 4xx response (chat not found, bot blocked, …):
+    retrying will never succeed, so scoring records should be persisted anyway.
+    Network errors and 5xx responses are transient (False, False)."""
     url = _TELEGRAM_URL.format(token=bot_token)
     async with httpx.AsyncClient(timeout=10.0) as client:
         try:
             r = await client.post(url, json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"})
-            return r.status_code == 200
+            if r.status_code == 200:
+                return True, False
+            if 400 <= r.status_code < 500:
+                logger.warning(f"Telegram permanently rejected message for chat_id={chat_id}: "
+                               f"{r.status_code} {r.text[:200]}")
+                return False, True
+            return False, False
         except httpx.RequestError as e:
             logger.error(f"Telegram request failed for chat_id={chat_id}: {e}")
-            return False
+            return False, False
+
+
+async def send_message(bot_token: str, chat_id: str, text: str) -> bool:
+    sent, _ = await send_message_ex(bot_token, chat_id, text)
+    return sent

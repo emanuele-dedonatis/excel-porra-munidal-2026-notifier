@@ -155,10 +155,10 @@ Points are **cumulative**: a correct sign earns 1 pt; same goal difference adds 
 
 **Knockout matches** are scored as two independent components:
 
-- **Score prediction** — sign / goal difference / exact, judged on the result **before penalties** (end of regular + extra time). A shootout match counts as the draw it was at full time, e.g. a 1–1 decided on penalties is scored as 1–1.
-- **Advancing team** — a separate advancement bonus (see table below) for picking the team that goes through.
+- **Score prediction** — sign / goal difference / exact, judged on the result **before penalties** (end of regular + extra time). A shootout match counts as the draw it was at full time, e.g. a 1–1 decided on penalties is scored as 1–1. Score points require your predicted pairing to match the real fixture.
+- **Advancing team** — a separate advancement bonus (see table below), **independent of the pairing**: the bonus is earned when the advancing team was predicted to reach the next round anywhere in your bracket, even if your predicted opponent was different (this matches the Excel template's "Equipo clasificado" rules).
 
-The two are scored separately, so a correct scoreline still earns its points even if the predicted advancing team is wrong — which can only happen when a draw is decided on penalties.
+The two are scored separately, so a correct scoreline still earns its points even if the predicted advancing team is wrong, and a correct advancing-team pick earns its point even when your bracket paired it against the wrong opponent.
 
 Each tournament stage can have independent values via env vars:
 
@@ -176,7 +176,7 @@ All default to `1 / 1 / 2`. Only set the ones that differ from your group's rule
 
 #### Group stage rankings
 
-Once all three matchdays of a group finish, the bot derives each user's **predicted group standings** by simulating the group table from their stored match predictions (predicted win/draw/loss → 3/1/0 pts, then sorted by goal difference and goals scored). It compares this with the actual API standings and awards 1 point per correctly predicted finishing position (1st / 2nd / 3rd / 4th).
+Once all three matchdays of a group finish (the bot verifies every group match is actually FINISHED — the standings API counts in-play games, so a live table is never trusted), the bot derives each user's **predicted group standings** by simulating the group table from their stored match predictions (predicted win/draw/loss → 3/1/0 pts, then sorted by goal difference and goals scored; perfect ties fall back to the actual standings order, matching how the Excel template resolves them). It compares this with the actual API standings and awards 1 point per correctly predicted finishing position (1st / 2nd / 3rd / 4th).
 
 Users receive one Telegram notification per group as it completes, and group ranking points are included in all totals shown by `/rank`, `/status`, and `/users`.
 
@@ -225,12 +225,12 @@ next - Next match not finished yet with your current pick
 | Command | Who | Description |
 |---------|-----|-------------|
 | `/chatid` | anyone | Returns your Telegram chat ID |
-| `/rank` | registered users | Group leaderboard ranked by total points, with ✅ ⚽ 🎯 ❌ breakdown per user |
+| `/rank` | registered users | Group leaderboard ranked by total points, with ✅ ⚽ 🎯 ❌ 🎫 breakdown per user |
 | `/predictions` | registered users | Full predictions list ordered by kickoff time (in your local timezone), with scores and points for finished matches |
 | `/results` | registered users | Finished matches only, with prediction outcome and points earned |
 | `/last` | registered users | Last finished match result with every user's prediction and points |
 | `/next` | registered users | Next match not finished yet with every user's current pick |
-| `/status` | registered users | Points summary with ✅ sign / ⚽ goal diff / 🎯 exact / ❌ wrong counts |
+| `/status` | registered users | Points summary with ✅ sign / ⚽ goal diff / 🎯 exact / ❌ wrong / 🎫 advancement counts |
 | `/users` | admin only | All registered users with their total points |
 | `/delete <chat_id>` | admin only | Remove a user and all their match records from the database |
 | `/broadcast <text>` | admin only | Send a custom message to all registered users (admin included) |
@@ -241,6 +241,8 @@ next - Next match not finished yet with your current pick
 ## Notifications
 
 The bot sends the following automatic notifications. All are per-user and personalised.
+
+If Telegram permanently rejects a delivery (e.g. the user registered a chat ID but never started the bot — "chat not found"), the match records and points are still stored so `/rank` and `/users` stay correct; only the message is lost. Transient network errors are retried on the next polling cycle.
 
 ### Match result
 
@@ -290,21 +292,35 @@ Germany 1–1 Paraguay (pens.)
 
 Your prediction: Paraguay (1–1)
 Score: 🎯 Exact score!  +4 pts
-Advancing team: ✅ Paraguay  +1 pts
+Advancing team: 🎫 Paraguay  +1 pts
 +5 pts  (total: 27 pts)
 ```
 
-The advancing-team bonus per stage:
+If your bracket paired the teams differently but the advancing team was still your pick for that round, you get the bonus with a dedicated message:
 
-| Stage | Advancement bonus (if correct) |
-|-------|-------------------------------|
-| R32 | +1 (advances to R16) |
-| R16 | +1 (advances to QF) |
-| QF | +1 (advances to SF) |
-| SF | +2 (finalist +1, implicit 3rd-place team +1) |
-| 3rd-place match | +1 |
-| Final — correct winner | +5 (champion) |
-| Final — wrong winner, correct loser | +3 (runner-up, shown as 🥈) |
+```
+⚽ Match finished
+South Africa 0–1 Canada
+
+Match not predicted  +0 pts
+Advancement prediction: 🎫 Canada  +1 pts
++1 pts  (total: 27 pts)
+```
+
+The advancing-team bonus per stage (all matchup-independent):
+
+| Stage | Advancement bonus (if correct) | Env var |
+|-------|-------------------------------|---------|
+| R32 winner reaches your predicted R16 | +1 | `POINTS_R32_ADVANCEMENT` |
+| R16 winner reaches your predicted QF | +1 | `POINTS_R16_ADVANCEMENT` |
+| QF winner reaches your predicted SF | +1 | `POINTS_QF_ADVANCEMENT` |
+| SF winner is one of your predicted finalists | +1 | `POINTS_SF_ADVANCEMENT` |
+| SF loser is in your predicted 3rd-place match | +1 | `POINTS_SF_LOSER_ADVANCEMENT` |
+| 3rd-place match won by your predicted 3rd place | +1 | `POINTS_3RD_ADVANCEMENT` |
+| Final won by your predicted champion | +5 | `POINTS_FINAL_ADVANCEMENT` |
+| Final lost by your predicted runner-up | +3 (shown as 🥈) | `POINTS_FINAL_RUNNER_UP` |
+
+The two Final bonuses are independent: predicting the exact final and its winner earns both (+8).
 
 ### Score correction
 
@@ -335,15 +351,15 @@ Group ranking: +2 pts  (total: 18 pts)
 
 ### R32 qualification bonuses (group stage → R32)
 
-Sent **once**, after all 12 groups are complete and the Round of 32 fixtures are published by the API. This is a separate notification because all 32 qualifiers are known before any R32 match is played. Shows for each group whether the user's predicted top-2 teams actually qualified (1 pt each).
+Sent **once**, after all 12 groups are complete and the Round of 32 fixtures are published by the API. This is a separate notification because all 32 qualifiers are known before any R32 match is played. Each actual qualifier earns 1 pt if it appears anywhere in the user's predicted R32 bracket (their 16 predicted R32 fixtures = 32 teams), mirroring the Excel's "Equipo clasificado para dieciseisavos" rule.
 
 ```
 🌍 R32 Qualification Bonuses
 
 Group A:  ✅ Germany  ✅ Scotland  +2
-Group B:  ✅ Spain  ❌ Croatia  +1
+Group B:  ✅ Spain  ❌ Croatia  ❌ Serbia  +1
 ...
-Group L:  ✅ France  ✅ Argentina  +2
+Group L:  ✅ France  ✅ Argentina  ✅ Ghana  +3
 
 +18 pts  (total: 56 pts)
 ```

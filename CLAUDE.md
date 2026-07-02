@@ -66,6 +66,8 @@ app/
 
 Scoring env vars follow the pattern `POINTS_{STAGE}_{TYPE}` where stage is `GROUP/R32/R16/QF/SF/3RD/FINAL` and type is `SIGN/GOAL_DIFF/EXACT`. All default to `1/1/2`.
 
+Advancement bonuses: `POINTS_{R32/R16/QF/SF/3RD}_ADVANCEMENT` (default `1` each), `POINTS_SF_LOSER_ADVANCEMENT` (default `1`, SF loser reaching the user's predicted 3rd-place match), `POINTS_FINAL_ADVANCEMENT` (default `5`, champion), `POINTS_FINAL_RUNNER_UP` (default `3`).
+
 `POINTS_GROUP_RANK_POSITION` — points per correctly predicted group finishing position (1st/2nd/3rd/4th). Default `1`.
 
 ---
@@ -80,7 +82,7 @@ Scoring env vars follow the pattern `POINTS_{STAGE}_{TYPE}` where stage is `GROU
 | `/results` | registered | Finished matches with outcome and points |
 | `/last` | registered | Last finished match with everyone's picks |
 | `/next` | registered | Next unfinished match with everyone's current pick |
-| `/status` | registered | Points summary (✅ ⚽ 🎯 ❌ counts) |
+| `/status` | registered | Points summary (✅ ⚽ 🎯 ❌ 🎫 counts) |
 | `/users` | admin only | All registered users with total points |
 | `/delete <chat_id>` | admin only | Remove a user and all their match records |
 | `/broadcast <text>` | admin only | Send a custom message to all registered users (admin included) |
@@ -103,13 +105,40 @@ The score-prediction sign/diff/exact is judged on the result **before penalties*
 predictions (`prediction` is a team name) the sign is derived from the predicted scoreline, not
 from the advancing team — so a correct scoreline scores even if the advancing-team pick is wrong.
 
-**Advancing team** (knockout only) — `+ADVANCEMENT` if the predicted team is the one that
-advanced (`match.winner`), or the Final's `+RUNNER_UP` bonus for predicting the losing finalist.
+**Advancing team** (knockout only) — **matchup-independent**, like the Excel's "Equipo
+clasificado" rules: the bonus is earned when the advancing team was predicted to reach the next
+round anywhere in the user's bracket (round-label lookup over `user_predictions`), even if the
+predicted pairing for the fixture was different or missing. Per stage:
+- R32/R16/QF: `+ADVANCEMENT` if the winner is one of the user's advance picks for that round.
+- SF: `+ADVANCEMENT` if the winner is in the user's predicted Final;
+  `+SF_LOSER_ADVANCEMENT` (`POINTS_SF_LOSER_ADVANCEMENT`, default 1) if the loser is in the
+  user's predicted 3rd-place match.
+- 3rd place: `+ADVANCEMENT` if the winner is the user's predicted 3rd-place-match winner.
+- Final: `+ADVANCEMENT` (champion, 5) if the winner is the user's predicted champion, and
+  independently `+RUNNER_UP` (3) if the loser is the user's predicted losing finalist.
+
+Because advancement is bracket-based, a user with no pairing prediction for a fixture can still
+earn points — such rows are stored with `prediction = NULL` but non-zero `points`.
+
+**Group rankings** are awarded only when all 6 of a group's matches are FINISHED — the standings
+API counts in-play games as played, so its live table is never trusted mid-match. Predicted
+standings are simulated from the user's group predictions; perfect ties (same pts/gd/gf) fall
+back to the actual standings order, matching how the Excel resolves them.
+
+**R32 qualification bonus** (per group in `GroupRankingAward.advancement_points`): 1 pt per actual
+R32 qualifier that appears anywhere in the user's predicted R32 bracket (the 32 teams of their
+`1/32` fixtures) — not the predicted top-3 of each group.
+
+**Delivery vs. persistence**: match records, awards, and corrections are persisted even when
+Telegram permanently rejects the message (4xx, e.g. "chat not found" for a user who never started
+the bot), so leaderboards stay correct; transient failures (network, 5xx) retry next cycle.
 
 Penalty-shootout handling lives in `football_api.get_matches`: `home_score`/`away_score` come from
 `regularTime + extraTime` (the pre-penalty score), and `winner` is derived from the combined
 `fullTime` when the API leaves it null. The stored `correct`/cv reflects scoreline accuracy only
-(0/1/2, plus 3 for the Final runner-up); the advancing-team point lives in `points`.
+(0/1/2, plus 3 for the Final runner-up); the advancing-team point lives in `points`. The recheck
+paths (`_correct_match_scores`) refresh `duration`/`winner` and no-prediction rows too, so stored
+results can't go permanently stale.
 
 ---
 

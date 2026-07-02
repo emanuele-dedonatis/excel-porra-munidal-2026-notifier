@@ -65,15 +65,41 @@ def simulate_predicted_standings(
     if matches_found < 6:
         return None
 
+    # Perfect ties (same pts/gd/gf) fall back to the incoming group_teams_en order —
+    # the actual standings order — which is how the Excel template resolves them.
     return sorted(
         group_teams_en,
-        key=lambda t: (-table[t]["pts"], -table[t]["gd"], -table[t]["gf"], t),
+        key=lambda t: (-table[t]["pts"], -table[t]["gd"], -table[t]["gf"], group_teams_en.index(t)),
     )
 
 
-def compute_r32_advancement_points(pred_pos: list[str], r32_teams: set[str]) -> int:
-    """1 pt per team predicted 1st, 2nd, or 3rd in the group that actually qualified for R32."""
-    return sum(1 for team in pred_pos[:3] if team in r32_teams)
+def predicted_r32_bracket(predictions_json: dict) -> list[str]:
+    """The 32 teams (Spanish names) in the user's predicted Round-of-32 bracket."""
+    teams: list[str] = []
+    for pred in (predictions_json or {}).values():
+        if str(pred.get("round_label", "")) == "1/32":
+            for key in ("home_team", "away_team"):
+                name = pred.get(key, "")
+                if name:
+                    teams.append(name)
+    return teams
+
+
+def compute_r32_advancement_points(
+    group_teams_en: list[str],
+    bracket_teams_es: list[str],
+    r32_teams: set[str],
+) -> int:
+    """1 pt per team of this group that qualified for the R32 AND appears in the user's
+    predicted R32 bracket (matchup-independent, like the Excel's 'Equipo clasificado
+    para dieciseisavos' rule)."""
+    pts = 0
+    for team_en in group_teams_en:
+        if team_en not in r32_teams:
+            continue
+        if any(names_match(team_es, team_en) for team_es in bracket_teams_es):
+            pts += 1
+    return pts
 
 
 def compute_ranking_points(

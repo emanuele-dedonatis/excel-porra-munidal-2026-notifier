@@ -47,15 +47,17 @@ class Settings(BaseSettings):
 
     points_group_rank_position: int = 1   # points per correct group finishing position (1st/2nd/3rd/4th)
 
-    # Advancement bonus: pts awarded on top of sign/diff/exact when prediction is correct
-    # SF = 2 because a correct SF winner also implicitly identifies the 3rd-place team (the loser)
+    # Advancement bonus (matchup-independent, like the Excel's "Equipo clasificado" rules):
+    # awarded when the advancing team was predicted to reach the next round anywhere in the
+    # user's bracket, even if their predicted pairing differs from the real fixture.
     points_r32_advancement: int = 1
     points_r16_advancement: int = 1
     points_qf_advancement: int = 1
-    points_sf_advancement: int = 2
+    points_sf_advancement: int = 1        # SF winner predicted among the user's finalists
+    points_sf_loser_advancement: int = 1  # SF loser predicted in the user's 3rd-place match
     points_3rd_advancement: int = 1
-    points_final_advancement: int = 5   # champion bonus
-    points_final_runner_up: int = 3     # bonus for predicting the team that LOSES the Final
+    points_final_advancement: int = 5   # champion bonus (predicted champion wins the Final)
+    points_final_runner_up: int = 3     # predicted losing finalist actually loses the Final
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
@@ -80,6 +82,11 @@ class Settings(BaseSettings):
             "THIRD_PLACE":    self.points_3rd_advancement,
             "FINAL":          self.points_final_advancement,
         }.get(stage, 0)
+
+    def stage_loser_advancement_points(self, stage: str) -> int:
+        """Bonus for the ELIMINATED team reaching the round the user predicted for it
+        (only meaningful for semi-finals: the loser goes to the 3rd-place match)."""
+        return self.points_sf_loser_advancement if stage == "SEMI_FINALS" else 0
 
     def stage_runner_up_points(self, stage: str) -> int:
         return self.points_final_runner_up if stage == "FINAL" else 0

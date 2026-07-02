@@ -35,14 +35,37 @@ async def _get_updates(bot_token: str, offset: int) -> list[dict]:
             return []
 
 
-def _stats(matches: list[NotifiedMatch]) -> tuple[int, int, int, int, int]:
-    """Return (total, sign_only, goal_diff, exact, total_pts) for a list of finished NotifiedMatches."""
-    total = sign_only = goal_diff = exact = total_pts = 0
+def _advancement_pts(n: NotifiedMatch) -> int:
+    """Advancement component of a row's stored points (total minus the score component)."""
+    total = n.points or 0
+    if total <= 0:
+        return 0
+    settings = get_settings()
+    sign_pts, goal_diff_pts, exact_pts = settings.stage_points(n.stage or "GROUP_STAGE")
+    cv = n.correct or 0
+    score = 0
+    if cv in (1, 2):
+        score = sign_pts
+        if (n.predicted_home_goals is not None and n.predicted_away_goals is not None
+                and n.home_score is not None and n.away_score is not None
+                and (n.predicted_home_goals - n.predicted_away_goals) == (n.home_score - n.away_score)):
+            score += goal_diff_pts
+            if cv == 2:
+                score += exact_pts
+    return max(total - score, 0)
+
+
+def _stats(matches: list[NotifiedMatch]) -> tuple[int, int, int, int, int, int]:
+    """Return (total, sign_only, goal_diff, exact, advancement, total_pts) for a list of
+    finished NotifiedMatches. advancement counts matches whose advancing-team bonus was earned."""
+    total = sign_only = goal_diff = exact = advancement = total_pts = 0
     for n in matches:
         total += 1
         total_pts += n.points or 0
+        if _advancement_pts(n) > 0:
+            advancement += 1
         cv = n.correct or 0
-        if cv == 0:
+        if cv not in (1, 2):
             continue
         is_exact = cv == 2
         is_diff = False
@@ -55,12 +78,13 @@ def _stats(matches: list[NotifiedMatch]) -> tuple[int, int, int, int, int]:
             goal_diff += 1
         else:
             sign_only += 1
-    return total, sign_only, goal_diff, exact, total_pts
+    return total, sign_only, goal_diff, exact, advancement, total_pts
 
 
-def _stats_line(total: int, sign_only: int, goal_diff: int, exact: int) -> str:
+def _stats_line(total: int, sign_only: int, goal_diff: int, exact: int, advancement: int) -> str:
     wrong = total - sign_only - goal_diff - exact
-    return f"✅ {sign_only + goal_diff + exact}  ⚽ {goal_diff + exact}  🎯 {exact}  ❌ {wrong}"
+    return (f"✅ {sign_only + goal_diff + exact}  ⚽ {goal_diff + exact}  🎯 {exact}  "
+            f"❌ {wrong}  🎫 {advancement}")
 
 
 def _group_ranking_pts(db: Session, telegram_chat_id: str) -> int:
@@ -83,9 +107,9 @@ def _build_status(user: User, notified: list[NotifiedMatch], group_rank_pts: int
         return "\n".join(lines)
 
     total_f = len(finished)
-    _, sign_only, goal_diff, exact, match_pts = _stats(finished)
+    _, sign_only, goal_diff, exact, advancement, match_pts = _stats(finished)
     total_pts = match_pts + group_rank_pts
-    lines.append(_stats_line(total_f, sign_only, goal_diff, exact))
+    lines.append(_stats_line(total_f, sign_only, goal_diff, exact, advancement))
     lines.append(f"⭐ Total points: <b>{total_pts} pts</b>  (matches: {match_pts}, group rankings: {group_rank_pts})")
     lines.append("")
 
@@ -93,6 +117,22 @@ def _build_status(user: User, notified: list[NotifiedMatch], group_rank_pts: int
         score = f"{n.home_score}–{n.away_score}" if n.home_score is not None else "?–?"
         suffix = {"EXTRA_TIME": " aet", "PENALTY_SHOOTOUT": " pens"}.get(n.duration or "", "")
         result = f"{n.home_team} {score}{suffix} {n.away_team}"
+
+        if n.prediction is None:
+            # No pairing prediction — a divergent bracket may still have earned the
+            # advancing-team bonus (matchup-independent rule).
+            if (n.points or 0) > 0:
+                winner_label = {"HOME_TEAM": n.home_team, "AWAY_TEAM": n.away_team}.get(n.winner or "")
+                mark = "🎫"
+                if winner_label:
+                    pred_label = f"match not predicted, {winner_label} advancement prediction +{n.points} pt"
+                else:
+                    pred_label = f"match not predicted, advancement prediction +{n.points} pt"
+            else:
+                mark = "⚪"
+                pred_label = "—"
+            lines.append(f"{mark} {result}  › {pred_label}")
+            continue
 
         mark = {3: "🥈", 2: "🎯", 1: "✅", 0: "❌"}.get(n.correct, "⚪")
 
@@ -102,10 +142,8 @@ def _build_status(user: User, notified: list[NotifiedMatch], group_rank_pts: int
             pred_label = n.away_team
         elif n.prediction == "draw":
             pred_label = "draw"
-        elif n.prediction:
-            pred_label = n.prediction  # knockout team name (Spanish)
         else:
-            pred_label = "—"
+            pred_label = n.prediction  # knockout team name (Spanish)
 
         if n.predicted_home_goals is not None and n.predicted_away_goals is not None:
             pred_label += f" ({n.predicted_home_goals}–{n.predicted_away_goals})"
@@ -415,7 +453,7 @@ async def _handle_standings(chat_id: str, bot_token: str):
         by_user.setdefault(nm.telegram_chat_id, []).append(nm)
 
     def sort_key(u: User):
-        _, _, _, _, match_pts = _stats(by_user.get(u.telegram_chat_id, []))
+        _, _, _, _, _, match_pts = _stats(by_user.get(u.telegram_chat_id, []))
         return match_pts + grp_pts_by_user.get(u.telegram_chat_id, 0)
 
     ranked = sorted(users, key=sort_key, reverse=True)
@@ -423,11 +461,11 @@ async def _handle_standings(chat_id: str, bot_token: str):
     medals = {1: "🥇", 2: "🥈", 3: "🥉"}
     lines = ["🏆 <b>Standings</b>\n"]
     for i, u in enumerate(ranked, 1):
-        total, sign_only, goal_diff, exact, match_pts = _stats(by_user.get(u.telegram_chat_id, []))
+        total, sign_only, goal_diff, exact, advancement, match_pts = _stats(by_user.get(u.telegram_chat_id, []))
         grp_pts = grp_pts_by_user.get(u.telegram_chat_id, 0)
         total_pts = match_pts + grp_pts
         prefix = medals.get(i, f"{i}.")
-        lines.append(f"{prefix} <b>{u.name}</b>  ⭐ {total_pts} pts\n    {_stats_line(total, sign_only, goal_diff, exact)}")
+        lines.append(f"{prefix} <b>{u.name}</b>  ⭐ {total_pts} pts\n    {_stats_line(total, sign_only, goal_diff, exact, advancement)}")
 
     await send_message(bot_token, chat_id, "\n".join(lines))
 
@@ -480,10 +518,21 @@ async def _handle_last(chat_id: str, bot_token: str):
 
     by_chat: dict[str, NotifiedMatch] = {r.telegram_chat_id: r for r in records}
 
+    winner_label = {"HOME_TEAM": ref.home_team, "AWAY_TEAM": ref.away_team}.get(ref.winner or "")
+
     for u in sorted(users, key=lambda x: x.name):
         nm = by_chat.get(u.telegram_chat_id)
         if not nm:
             lines.append(f"⚪ <b>{u.name}</b>  › no prediction")
+            continue
+        if nm.prediction is None:
+            # No pairing prediction for this fixture; a divergent bracket can still
+            # earn the advancing-team bonus (matchup-independent rule).
+            if (nm.points or 0) > 0 and winner_label:
+                lines.append(f"🎫 <b>{u.name}</b>  › match not predicted +0 pts, "
+                             f"{winner_label} advancement prediction +{nm.points} pt")
+            else:
+                lines.append(f"⚪ <b>{u.name}</b>  › no prediction  +0 pts")
             continue
         mark = {3: "🥈", 2: "🎯", 1: "✅", 0: "❌"}.get(nm.correct, "⚪")
         if nm.prediction == "home":
