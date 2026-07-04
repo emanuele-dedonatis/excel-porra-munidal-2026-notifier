@@ -11,7 +11,8 @@ from .config import get_settings
 from .database import SessionLocal
 from .football_api import get_matches
 from .models import GroupRankingAward, NotifiedMatch, User
-from .notifier import send_message
+from .notifier import (STAGE_ROUND_LABEL, is_knockout_prediction, predicted_round_participant,
+                       predicted_round_winner, send_message)
 from .scheduler import _find_prediction, force_recheck_all, recalculate_r32_advancement
 from .team_names import ENGLISH_TO_SPANISH, names_match, normalize, spanish_to_english
 
@@ -110,45 +111,7 @@ def _build_status(user: User, notified: list[NotifiedMatch], group_rank_pts: int
     _, sign_only, goal_diff, exact, advancement, match_pts = _stats(finished)
     total_pts = match_pts + group_rank_pts
     lines.append(_stats_line(total_f, sign_only, goal_diff, exact, advancement))
-    lines.append(f"⭐ Total points: <b>{total_pts} pts</b>  (matches: {match_pts}, group rankings: {group_rank_pts})")
-    lines.append("")
-
-    for n in sorted(finished, key=lambda x: x.notified_at or datetime.min.replace(tzinfo=timezone.utc)):
-        score = f"{n.home_score}–{n.away_score}" if n.home_score is not None else "?–?"
-        suffix = {"EXTRA_TIME": " aet", "PENALTY_SHOOTOUT": " pens"}.get(n.duration or "", "")
-        result = f"{n.home_team} {score}{suffix} {n.away_team}"
-
-        if n.prediction is None:
-            # No pairing prediction — a divergent bracket may still have earned the
-            # advancing-team bonus (matchup-independent rule).
-            if (n.points or 0) > 0:
-                winner_label = {"HOME_TEAM": n.home_team, "AWAY_TEAM": n.away_team}.get(n.winner or "")
-                mark = "🎫"
-                if winner_label:
-                    pred_label = f"match not predicted, {winner_label} advancement prediction +{n.points} pt"
-                else:
-                    pred_label = f"match not predicted, advancement prediction +{n.points} pt"
-            else:
-                mark = "⚪"
-                pred_label = "—"
-            lines.append(f"{mark} {result}  › {pred_label}")
-            continue
-
-        mark = {3: "🥈", 2: "🎯", 1: "✅", 0: "❌"}.get(n.correct, "⚪")
-
-        if n.prediction == "home":
-            pred_label = n.home_team
-        elif n.prediction == "away":
-            pred_label = n.away_team
-        elif n.prediction == "draw":
-            pred_label = "draw"
-        else:
-            pred_label = n.prediction  # knockout team name (Spanish)
-
-        if n.predicted_home_goals is not None and n.predicted_away_goals is not None:
-            pred_label += f" ({n.predicted_home_goals}–{n.predicted_away_goals})"
-
-        lines.append(f"{mark} {result}  › {pred_label}")
+    lines.append(f"⭐ Total points: <b>{total_pts} pts</b>")
 
     return "\n".join(lines)
 
@@ -170,10 +133,7 @@ async def _handle_status(chat_id: str, bot_token: str):
     finally:
         db.close()
 
-    # Send in chunks if the message is long (many finished matches)
-    while text:
-        chunk, text = text[:_MAX_MSG], text[_MAX_MSG:]
-        await send_message(bot_token, chat_id, chunk)
+    await send_message(bot_token, chat_id, text)
 
 
 def _prediction_label(prediction: str, home_es: str, away_es: str,
@@ -201,7 +161,23 @@ def _build_nm_lookup(notified: list[NotifiedMatch]) -> dict:
     return lookup
 
 
-def _prediction_line(pred: dict, nm_lookup: dict, utc_offset: float = 0.0) -> str:
+def _round_advancement_winners(notified: list[NotifiedMatch]) -> dict[str, list[tuple[str, int]]]:
+    """round_label → [(advancing team EN, advancement pts this user earned)] for
+    finished knockout matches. Used to credit 🎫 on predicted pairings that never
+    took place but whose advancing-team pick still came true."""
+    winners: dict[str, list[tuple[str, int]]] = {}
+    for nm in notified:
+        label = STAGE_ROUND_LABEL.get(nm.stage or "")
+        if not label or nm.home_score is None:
+            continue
+        winner_en = {"HOME_TEAM": nm.home_team, "AWAY_TEAM": nm.away_team}.get(nm.winner or "")
+        if winner_en:
+            winners.setdefault(label, []).append((winner_en, _advancement_pts(nm)))
+    return winners
+
+
+def _prediction_line(pred: dict, nm_lookup: dict, utc_offset: float = 0.0,
+                     round_winners: dict[str, list[tuple[str, int]]] | None = None) -> str:
     home_es = pred.get("home_team", "?")
     away_es = pred.get("away_team", "?")
     prediction = pred.get("prediction") or "—"
@@ -211,13 +187,16 @@ def _prediction_line(pred: dict, nm_lookup: dict, utc_offset: float = 0.0) -> st
     pred_label = _prediction_label(prediction, home_es, away_es, pred_hg, pred_ag)
 
     kickoff_str = "?"
+    kickoff_dt = None
     kickoff_iso = pred.get("kickoff_utc")
     if kickoff_iso:
         try:
-            dt = datetime.fromisoformat(kickoff_iso) + timedelta(hours=utc_offset)
-            kickoff_str = dt.strftime("%d %b %H:%M")
+            kickoff_dt = datetime.fromisoformat(kickoff_iso)
+            if kickoff_dt.tzinfo is None:
+                kickoff_dt = kickoff_dt.replace(tzinfo=timezone.utc)
+            kickoff_str = (kickoff_dt + timedelta(hours=utc_offset)).strftime("%d %b %H:%M")
         except (ValueError, TypeError):
-            pass
+            kickoff_dt = None
 
     # Look up finished match by mapped English team names (try both home/away orderings)
     home_en = normalize(spanish_to_english(home_es))
@@ -228,10 +207,27 @@ def _prediction_line(pred: dict, nm_lookup: dict, utc_offset: float = 0.0) -> st
         score = f"{nm.home_score}–{nm.away_score}"
         suffix = {"EXTRA_TIME": " aet", "PENALTY_SHOOTOUT": " pens"}.get(nm.duration or "", "")
         mark = {3: "🥈", 2: "🎯", 1: "✅", 0: "❌"}.get(nm.correct, "⚪")
+        if mark == "❌" and _advancement_pts(nm) > 0:
+            # Score wrong, but the advancing-team bonus was earned.
+            mark = "🎫"
         pts_str = f"  +{nm.points} pts" if nm.points is not None else ""
         return f"{mark} {kickoff_str} {nm.home_team} {score}{suffix} {nm.away_team}  › {pred_label}{pts_str}"
     else:
-        return f"⚪ {kickoff_str} {home_es} vs {away_es}  › {pred_label}"
+        # Pending match: 🔮 prediction registered, ⚪ no pick in the Excel row.
+        mark = "⚪" if prediction == "—" else "🔮"
+        # A predicted matchup whose kickoff is well past but has no stored result
+        # never took place (divergent knockout bracket) — it can't score anymore.
+        # 🎫 if the advancing-team pick still came true in the round's real fixture.
+        if kickoff_dt is not None and datetime.now(timezone.utc) - kickoff_dt > timedelta(hours=4):
+            mark, pts_str = "❌", "  +0 pts"
+            if is_knockout_prediction(prediction) and prediction != "—":
+                label = str(pred.get("round_label", ""))
+                for winner_en, adv_pts in (round_winners or {}).get(label, []):
+                    if adv_pts > 0 and names_match(prediction, winner_en):
+                        mark, pts_str = "🎫", f"  +{adv_pts} pts"
+                        break
+            return f"{mark} {kickoff_str} {home_es} vs {away_es}  › {pred_label}{pts_str}"
+        return f"{mark} {kickoff_str} {home_es} vs {away_es}  › {pred_label}"
 
 
 def _chunk_messages(lines: list[str], max_len: int = _MAX_MSG) -> list[str]:
@@ -269,79 +265,57 @@ def _kickoff_dt(pred: dict) -> datetime:
     return datetime.min.replace(tzinfo=timezone.utc)
 
 
-def _find_prediction_by_match(user: User, home_en: str, away_en: str) -> dict | None:
+def _is_past_pred(pred: dict, nm_lookup: dict) -> bool:
+    """A prediction row is 'past' when its fixture has a stored result, or its
+    kickoff is more than 4h gone (matchup never took place, or result pending)."""
+    home_en = normalize(spanish_to_english(pred.get("home_team", "")))
+    away_en = normalize(spanish_to_english(pred.get("away_team", "")))
+    nm = nm_lookup.get((home_en, away_en)) or nm_lookup.get((away_en, home_en))
+    if nm is not None and nm.home_score is not None:
+        return True
+    kickoff_iso = pred.get("kickoff_utc")
+    if not kickoff_iso:
+        return False
+    try:
+        kickoff_dt = datetime.fromisoformat(kickoff_iso)
+    except (ValueError, TypeError):
+        return False
+    if kickoff_dt.tzinfo is None:
+        kickoff_dt = kickoff_dt.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - kickoff_dt > timedelta(hours=4)
+
+
+def _build_prediction_messages(user: User, notified: list[NotifiedMatch], past: bool) -> list[str]:
+    """Per-round messages for the user's prediction rows: past=True yields the
+    played/expired rows (/results), past=False the upcoming ones (/predictions)."""
+    nm_lookup = _build_nm_lookup(notified)
+    round_winners = _round_advancement_winners(notified)
     preds = user.predictions or {}
-    for pred in preds.values():
-        pred_home = normalize(spanish_to_english(pred.get("home_team", "")))
-        pred_away = normalize(spanish_to_english(pred.get("away_team", "")))
-        if (pred_home == home_en and pred_away == away_en) or \
-           (pred_home == away_en and pred_away == home_en):
-            return pred
-    return None
+    sorted_preds = sorted(((int(k), v) for k, v in preds.items()), key=lambda x: _kickoff_dt(x[1]))
+    utc_offset = user.utc_offset_hours or 0.0
+
+    all_messages: list[str] = []
+
+    for title, rng in [("🏟 <b>Group Stage</b>", range(1, 73)), *_KNOCKOUT_ROUNDS]:
+        round_preds = [p for n, p in sorted_preds if n in rng and _is_past_pred(p, nm_lookup) == past]
+        if not round_preds:
+            continue
+        lines = [title]
+        for pred in round_preds:
+            lines.append(_prediction_line(pred, nm_lookup, utc_offset, round_winners))
+        all_messages.extend(_chunk_messages(lines))
+
+    return all_messages
 
 
 def _build_predictions(user: User, notified: list[NotifiedMatch]) -> list[str]:
-    nm_lookup = _build_nm_lookup(notified)
-    preds = user.predictions or {}
-    sorted_preds = sorted(((int(k), v) for k, v in preds.items()), key=lambda x: _kickoff_dt(x[1]))
-    utc_offset = user.utc_offset_hours or 0.0
-
-    all_messages: list[str] = []
-
-    # --- Group stage ---
-    group_preds = [(n, p) for n, p in sorted_preds if n <= 72]
-    lines = ["🏟 <b>Group Stage</b>"]
-    for _match_num, pred in group_preds:
-        lines.append(_prediction_line(pred, nm_lookup, utc_offset))
-    all_messages.extend(_chunk_messages(lines))
-
-    # --- Knockout rounds ---
-    for title, rng in _KNOCKOUT_ROUNDS:
-        round_preds = [(n, p) for n, p in sorted_preds if n in rng]
-        if not round_preds:
-            continue
-        lines = [title]
-        for _match_num, pred in round_preds:
-            lines.append(_prediction_line(pred, nm_lookup, utc_offset))
-        all_messages.extend(_chunk_messages(lines))
-
-    return all_messages
+    return (_build_prediction_messages(user, notified, past=False)
+            or ["No upcoming matches left — the tournament is over! 🏁"])
 
 
 def _build_results(user: User, notified: list[NotifiedMatch]) -> list[str]:
-    nm_lookup = _build_nm_lookup(notified)
-    preds = user.predictions or {}
-    sorted_preds = sorted(((int(k), v) for k, v in preds.items()), key=lambda x: _kickoff_dt(x[1]))
-    utc_offset = user.utc_offset_hours or 0.0
-
-    def is_finished(pred: dict) -> bool:
-        home_en = normalize(spanish_to_english(pred.get("home_team", "")))
-        away_en = normalize(spanish_to_english(pred.get("away_team", "")))
-        nm = nm_lookup.get((home_en, away_en)) or nm_lookup.get((away_en, home_en))
-        return nm is not None and nm.home_score is not None
-
-    all_messages: list[str] = []
-
-    group_preds = [(n, p) for n, p in sorted_preds if n <= 72 and is_finished(p)]
-    if group_preds:
-        lines = ["🏟 <b>Group Stage</b>"]
-        for _match_num, pred in group_preds:
-            lines.append(_prediction_line(pred, nm_lookup, utc_offset))
-        all_messages.extend(_chunk_messages(lines))
-
-    for title, rng in _KNOCKOUT_ROUNDS:
-        round_preds = [(n, p) for n, p in sorted_preds if n in rng and is_finished(p)]
-        if not round_preds:
-            continue
-        lines = [title]
-        for _match_num, pred in round_preds:
-            lines.append(_prediction_line(pred, nm_lookup, utc_offset))
-        all_messages.extend(_chunk_messages(lines))
-
-    if not all_messages:
-        all_messages = ["No finished matches yet — stay tuned! ⏳"]
-
-    return all_messages
+    return (_build_prediction_messages(user, notified, past=True)
+            or ["No finished matches yet — stay tuned! ⏳"])
 
 
 async def _handle_results(chat_id: str, bot_token: str):
@@ -495,60 +469,56 @@ async def _handle_last(chat_id: str, bot_token: str):
     finally:
         db.close()
 
+    await send_message(bot_token, chat_id, _build_last_message(records, users))
+
+
+def _build_last_message(records: list[NotifiedMatch], users: list[User]) -> str:
     # Grab match details from any record
     ref = records[0]
     score = f"{ref.home_score}–{ref.away_score}"
     suffix = {"EXTRA_TIME": " aet", "PENALTY_SHOOTOUT": " pens"}.get(ref.duration or "", "")
 
-    kickoff_str = "?"
-    if user:
-        match_home_en = normalize(spanish_to_english(ref.home_team or ""))
-        match_away_en = normalize(spanish_to_english(ref.away_team or ""))
-        match_pred = _find_prediction_by_match(user, match_home_en, match_away_en)
-        if match_pred is not None:
-            kickoff_iso = match_pred.get("kickoff_utc")
-            if kickoff_iso:
-                try:
-                    dt = datetime.fromisoformat(kickoff_iso) + timedelta(hours=user.utc_offset_hours or 0.0)
-                    kickoff_str = dt.strftime("%d %b %H:%M")
-                except (ValueError, TypeError):
-                    pass
-
-    lines = [f"⚽ <b>Last match</b>", f"{kickoff_str} <b>{ref.home_team} {score}{suffix} {ref.away_team}</b>\n"]
+    lines = [f"⚽ <b>Last match</b>", f"<b>{ref.home_team} {score}{suffix} {ref.away_team}</b>"]
 
     by_chat: dict[str, NotifiedMatch] = {r.telegram_chat_id: r for r in records}
 
-    winner_label = {"HOME_TEAM": ref.home_team, "AWAY_TEAM": ref.away_team}.get(ref.winner or "")
+    # The advancement line only applies to knockout fixtures; the Final's
+    # champion/runner-up bonuses are shown in the notification itself, not here.
+    show_advancement = (ref.stage or "GROUP_STAGE") not in ("GROUP_STAGE", "FINAL")
+
+    def _pts(n: int) -> str:
+        return f"+{n} pt" if n == 1 else f"+{n} pts"
 
     for u in sorted(users, key=lambda x: x.name):
         nm = by_chat.get(u.telegram_chat_id)
-        if not nm:
-            lines.append(f"⚪ <b>{u.name}</b>  › no prediction")
-            continue
-        if nm.prediction is None:
-            # No pairing prediction for this fixture; a divergent bracket can still
-            # earn the advancing-team bonus (matchup-independent rule).
-            if (nm.points or 0) > 0 and winner_label:
-                lines.append(f"🎫 <b>{u.name}</b>  › match not predicted +0 pts, "
-                             f"{winner_label} advancement prediction +{nm.points} pt")
-            else:
-                lines.append(f"⚪ <b>{u.name}</b>  › no prediction  +0 pts")
-            continue
-        mark = {3: "🥈", 2: "🎯", 1: "✅", 0: "❌"}.get(nm.correct, "⚪")
-        if nm.prediction == "home":
-            pred_label = ref.home_team
-        elif nm.prediction == "away":
-            pred_label = ref.away_team
-        elif nm.prediction == "draw":
-            pred_label = "draw"
-        else:
-            pred_label = nm.prediction
-        if nm.predicted_home_goals is not None and nm.predicted_away_goals is not None:
-            pred_label += f" ({nm.predicted_home_goals}–{nm.predicted_away_goals})"
-        pts_str = f"  +{nm.points} pts" if nm.points is not None else ""
-        lines.append(f"{mark} <b>{u.name}</b>  › {pred_label}{pts_str}")
+        adv_pts = _advancement_pts(nm) if nm else 0
+        score_pts = max((nm.points or 0) - adv_pts, 0) if nm else 0
 
-    await send_message(bot_token, chat_id, "\n".join(lines))
+        lines.append(f"\n<b>{u.name}</b>")
+
+        if nm is None or nm.prediction is None:
+            lines.append("❌ Score not predicted  +0 pts")
+        else:
+            if nm.predicted_home_goals is not None and nm.predicted_away_goals is not None:
+                pred_label = f"{nm.predicted_home_goals}–{nm.predicted_away_goals}"
+            elif nm.prediction == "home":
+                pred_label = f"{ref.home_team} win"
+            elif nm.prediction == "away":
+                pred_label = f"{ref.away_team} win"
+            elif nm.prediction == "draw":
+                pred_label = "draw"
+            else:
+                pred_label = nm.prediction
+            mark = {2: "🎯", 1: "✅"}.get(nm.correct or 0, "❌")
+            lines.append(f"{mark} Score {pred_label}  {_pts(score_pts)}")
+
+        if show_advancement:
+            if adv_pts > 0:
+                lines.append(f"🎫 Advancement  {_pts(adv_pts)}")
+            else:
+                lines.append("❌ Advancement  +0 pts")
+
+    return "\n".join(lines)
 
 
 # Cache of the full fixtures list so repeated /next calls don't hit the API
@@ -633,10 +603,32 @@ async def _handle_next(chat_id: str, bot_token: str):
                 f"{kickoff_str} <b>{header_home} vs {header_away}</b>\n",
             ]
 
+        # Advancement picks (matchup-independent, same rules as scoring) are shown
+        # for users without a pairing prediction — knockout rounds except the Final,
+        # consistent with /last. SF winners are checked against the predicted Final.
+        stage = next_match.stage or ""
+        round_label = STAGE_ROUND_LABEL.get(stage)
+
+        def _predicted_to_advance(preds: dict | None, team_en: str) -> bool:
+            if not round_label or stage == "FINAL" or not preds:
+                return False
+            if stage == "SEMI_FINALS":
+                return predicted_round_participant(preds, "Final", team_en)
+            return predicted_round_winner(preds, round_label, team_en)
+
         for other in users:
             other_match = user_preds.get(other.telegram_chat_id)
             if other_match is None:
-                lines.append(f"⚪ <b>{other.name}</b>  › no prediction")
+                picked = []
+                if _predicted_to_advance(other.predictions, next_match.home_team):
+                    picked.append(header_home)
+                if _predicted_to_advance(other.predictions, next_match.away_team):
+                    picked.append(header_away)
+                if picked:
+                    verb = "advance" if len(picked) > 1 else "advances"
+                    lines.append(f"🎫 <b>{other.name}</b>  › {' & '.join(picked)} {verb}")
+                else:
+                    lines.append(f"⚪ <b>{other.name}</b>  › no prediction")
                 continue
 
             other_label = _prediction_label(
@@ -646,7 +638,7 @@ async def _handle_next(chat_id: str, bot_token: str):
                 other_match.get("predicted_home_goals"),
                 other_match.get("predicted_away_goals"),
             )
-            lines.append(f"⚪ <b>{other.name}</b>  › {other_label}")
+            lines.append(f"🔮 <b>{other.name}</b>  › {other_label}")
 
         await send_message(bot_token, chat_id, "\n".join(lines))
     finally:

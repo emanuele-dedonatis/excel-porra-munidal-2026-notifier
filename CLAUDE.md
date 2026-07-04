@@ -78,8 +78,8 @@ Advancement bonuses: `POINTS_{R32/R16/QF/SF/3RD}_ADVANCEMENT` (default `1` each)
 |---------|-----|-------------|
 | `/chatid` | anyone | Returns the user's Telegram chat ID |
 | `/rank` | registered | Group leaderboard ranked by total points |
-| `/predictions` | registered | Full prediction list with kickoff times and results |
-| `/results` | registered | Finished matches with outcome and points |
+| `/predictions` | registered | Upcoming predictions with kickoff times (🔮 pick / ⚪ no pick) |
+| `/results` | registered | Past matches with outcome and points (🎯/✅/❌; 🎫 advancement-only for predicted pairings that never took place) |
 | `/last` | registered | Last finished match with everyone's picks |
 | `/next` | registered | Next unfinished match with everyone's current pick |
 | `/status` | registered | Points summary (✅ ⚽ 🎯 ❌ 🎫 counts) |

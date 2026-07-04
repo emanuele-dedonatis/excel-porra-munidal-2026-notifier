@@ -213,8 +213,8 @@ To show the command list in Telegram, send `/setcommands` to [@BotFather](https:
 ```
 chatid - Get your Telegram chat ID
 rank - Leaderboard with points and prediction stats
-predictions - Your full predictions list with kickoff times and results
-results - Finished matches with your outcomes and points earned
+predictions - Your upcoming predictions with kickoff times
+results - Past matches with your outcomes and points earned
 status - Your points summary and prediction breakdown
 last - Last match result with everyone's picks
 next - Next match not finished yet with your current pick
@@ -226,8 +226,8 @@ next - Next match not finished yet with your current pick
 |---------|-----|-------------|
 | `/chatid` | anyone | Returns your Telegram chat ID |
 | `/rank` | registered users | Group leaderboard ranked by total points, with ✅ ⚽ 🎯 ❌ 🎫 breakdown per user |
-| `/predictions` | registered users | Full predictions list ordered by kickoff time (in your local timezone), with scores and points for finished matches |
-| `/results` | registered users | Finished matches only, with prediction outcome and points earned |
+| `/predictions` | registered users | Upcoming (not yet decided) predictions ordered by kickoff time (in your local timezone): 🔮 pick registered, ⚪ no pick |
+| `/results` | registered users | Past matches with prediction outcome and points: 🎯 exact / ✅ correct / ❌ wrong, plus 🎫 for predicted pairings that never took place but whose advancing-team pick still earned the bonus |
 | `/last` | registered users | Last finished match result with every user's prediction and points |
 | `/next` | registered users | Next match not finished yet with every user's current pick |
 | `/status` | registered users | Points summary with ✅ sign / ⚽ goal diff / 🎯 exact / ❌ wrong / 🎫 advancement counts |
